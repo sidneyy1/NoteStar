@@ -50,6 +50,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.OpenWith
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TextFields
@@ -85,6 +86,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -182,6 +184,11 @@ fun EditorScreen(
     onEnterPip: () -> Unit
 ) {
     var title by remember { mutableStateOf(initialDoc.title) }
+    // Phones get compact chrome so the page stays visible; tablets keep
+    // full-size controls.
+    val compact = LocalConfiguration.current.screenWidthDp < 600
+    val btnSize = if (compact) 38.dp else 48.dp
+    val iconSize = if (compact) 20.dp else 24.dp
     val pagesState = remember {
         mutableStateListOf<Page>().apply { addAll(initialDoc.pages) }
     }
@@ -239,6 +246,7 @@ fun EditorScreen(
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
     var beautifyOn by remember { mutableStateOf(false) }
     var chromeVisible by remember { mutableStateOf(true) }
+    var paletteVisible by remember { mutableStateOf(!compact) }
     var showLayers by remember { mutableStateOf(false) }
     var showOutline by remember { mutableStateOf(false) }
     var newTextSize by remember { mutableStateOf(20f) }
@@ -342,14 +350,25 @@ fun EditorScreen(
                     singleLine = true,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onEnterPip) {
-                    Icon(Icons.Filled.PictureInPicture, contentDescription = "Picture in picture")
+                IconButton(onClick = onEnterPip, modifier = Modifier.size(btnSize)) {
+                    Icon(
+                        Icons.Filled.PictureInPicture,
+                        contentDescription = "Picture in picture",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
-                IconButton(onClick = {
-                    commitEditing()
-                    onSave(buildDocument())
-                }) {
-                    Icon(Icons.Filled.Save, contentDescription = "Save note")
+                IconButton(
+                    onClick = {
+                        commitEditing()
+                        onSave(buildDocument())
+                    },
+                    modifier = Modifier.size(btnSize)
+                ) {
+                    Icon(
+                        Icons.Filled.Save,
+                        contentDescription = "Save note",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
             }
 
@@ -371,48 +390,92 @@ fun EditorScreen(
                 toolIcons.forEach { (t, icon, description) ->
                     IconButton(
                         onClick = { selectTool(t) },
-                        modifier = Modifier.background(
-                            if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                            CircleShape
-                        )
+                        modifier = Modifier
+                            .size(btnSize)
+                            .background(
+                                if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                CircleShape
+                            )
                     ) {
-                        Icon(icon, contentDescription = description)
+                        Icon(icon, contentDescription = description, modifier = Modifier.size(iconSize))
                     }
                 }
                 IconButton(
                     onClick = { beautifyOn = !beautifyOn },
-                    modifier = Modifier.background(
-                        if (beautifyOn) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                        CircleShape
-                    )
+                    modifier = Modifier
+                        .size(btnSize)
+                        .background(
+                            if (beautifyOn) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                            CircleShape
+                        )
                 ) {
-                    Icon(Icons.Filled.AutoFixHigh, contentDescription = "Handwriting beautifier")
+                    Icon(
+                        Icons.Filled.AutoFixHigh,
+                        contentDescription = "Handwriting beautifier",
+                        modifier = Modifier.size(iconSize)
+                    )
+                }
+                IconButton(
+                    onClick = { paletteVisible = !paletteVisible },
+                    modifier = Modifier
+                        .size(btnSize)
+                        .background(
+                            if (paletteVisible) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                            CircleShape
+                        )
+                ) {
+                    Icon(
+                        Icons.Filled.Palette,
+                        contentDescription = "Show / hide colors",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
                 Spacer(modifier = Modifier.width(12.dp))
-                IconButton(onClick = {
-                    val layer = activeLayer()
-                    if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
-                        redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
+                IconButton(
+                    modifier = Modifier.size(btnSize),
+                    onClick = {
+                        val layer = activeLayer()
+                        if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
+                            redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
+                        }
                     }
-                }) {
-                    Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Undo,
+                        contentDescription = "Undo",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
-                IconButton(onClick = {
-                    val layer = activeLayer()
-                    if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
-                        layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
+                IconButton(
+                    modifier = Modifier.size(btnSize),
+                    onClick = {
+                        val layer = activeLayer()
+                        if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
+                            layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
+                        }
                     }
-                }) {
-                    Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Redo,
+                        contentDescription = "Redo",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
-                IconButton(onClick = {
-                    val layer = activeLayer()
-                    if (layer != null && !layer.locked) {
-                        layer.strokes.clear()
-                        redoStack.clear()
+                IconButton(
+                    modifier = Modifier.size(btnSize),
+                    onClick = {
+                        val layer = activeLayer()
+                        if (layer != null && !layer.locked) {
+                            layer.strokes.clear()
+                            redoStack.clear()
+                        }
                     }
-                }) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Clear ink on layer")
+                ) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Clear ink on layer",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
             }
 
@@ -423,33 +486,69 @@ fun EditorScreen(
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = { showLayers = true }) {
-                    Icon(Icons.Filled.Layers, contentDescription = "Layers")
+                IconButton(onClick = { showLayers = true }, modifier = Modifier.size(btnSize)) {
+                    Icon(
+                        Icons.Filled.Layers,
+                        contentDescription = "Layers",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
-                IconButton(onClick = { showOutline = true }) {
-                    Icon(Icons.Filled.FormatListBulleted, contentDescription = "Outline")
+                IconButton(onClick = { showOutline = true }, modifier = Modifier.size(btnSize)) {
+                    Icon(
+                        Icons.Filled.FormatListBulleted,
+                        contentDescription = "Outline",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
-                IconButton(onClick = {
-                    commitEditing()
-                    onExcerptPage(title.ifBlank { "Untitled" }, snapshotCurrentPage())
-                }) {
-                    Icon(Icons.Filled.ContentCut, contentDescription = "Excerpt page into new note")
+                IconButton(
+                    onClick = {
+                        commitEditing()
+                        onExcerptPage(title.ifBlank { "Untitled" }, snapshotCurrentPage())
+                    },
+                    modifier = Modifier.size(btnSize)
+                ) {
+                    Icon(
+                        Icons.Filled.ContentCut,
+                        contentDescription = "Excerpt page into new note",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                IconButton(onClick = { switchPage(currentPageIndex - 1) }) {
-                    Icon(Icons.Filled.KeyboardArrowLeft, contentDescription = "Previous page")
+                IconButton(
+                    onClick = { switchPage(currentPageIndex - 1) },
+                    modifier = Modifier.size(btnSize)
+                ) {
+                    Icon(
+                        Icons.Filled.KeyboardArrowLeft,
+                        contentDescription = "Previous page",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
                 Text("Page ${currentPageIndex + 1} / ${pagesState.size}")
-                IconButton(onClick = { switchPage(currentPageIndex + 1) }) {
-                    Icon(Icons.Filled.KeyboardArrowRight, contentDescription = "Next page")
+                IconButton(
+                    onClick = { switchPage(currentPageIndex + 1) },
+                    modifier = Modifier.size(btnSize)
+                ) {
+                    Icon(
+                        Icons.Filled.KeyboardArrowRight,
+                        contentDescription = "Next page",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
-                IconButton(onClick = {
-                    pagesState[currentPageIndex] = snapshotCurrentPage()
-                    val newPage = Page.create(currentTemplate)
-                    pagesState.add(newPage)
-                    switchPage(pagesState.lastIndex)
-                }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Add page")
+                IconButton(
+                    onClick = {
+                        pagesState[currentPageIndex] = snapshotCurrentPage()
+                        val newPage = Page.create(currentTemplate)
+                        pagesState.add(newPage)
+                        switchPage(pagesState.lastIndex)
+                    },
+                    modifier = Modifier.size(btnSize)
+                ) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = "Add page",
+                        modifier = Modifier.size(iconSize)
+                    )
                 }
             }
 
@@ -520,15 +619,18 @@ fun EditorScreen(
                         }
                     }
                 }
-                Text(
-                    text = "Tap the page to type. Tap text to select, tap again to edit. Pinch a text to resize it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
+                if (!compact) {
+                    Text(
+                        text = "Tap the page to type. Tap text to select, tap again to edit. Pinch a text to resize it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
             }
 
-            // Palette + size + hex (hidden while erasing or moving)
-            if (tool != Tool.ERASER && tool != Tool.MOVE) {
+            // Palette + size + hex (toggle with the palette button; also
+            // hidden while erasing or moving)
+            if (paletteVisible && tool != Tool.ERASER && tool != Tool.MOVE) {
                 val palette = if (tool == Tool.HIGHLIGHTER) highlighterColors else penColors
                 Row(
                     modifier = Modifier
