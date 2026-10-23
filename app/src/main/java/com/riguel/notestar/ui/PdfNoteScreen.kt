@@ -587,22 +587,21 @@ fun PdfNoteScreen(
                                                         RoundedCornerShape(4.dp)
                                                     )
                                                     .pointerInput(element.id, scaleFactor) {
-                                                        var acc: TextElement? = null
-                                                        detectTransformGestures(
-                                                            onGestureStart = { acc = element },
-                                                            onGesture = { _, pan, zoom, _ ->
-                                                                val base = acc ?: element
-                                                                val updated = base.copy(
+                                                        // pan/zoom are per-event changes;
+                                                        // apply them to the freshest state.
+                                                        detectTransformGestures { _, pan, zoom, _ ->
+                                                            val base = texts.firstOrNull {
+                                                                it.id == element.id
+                                                            } ?: element
+                                                            updateText(
+                                                                base.copy(
                                                                     x = base.x + pan.x / scaleFactor,
                                                                     y = base.y + pan.y / scaleFactor,
                                                                     fontSizeSp = (base.fontSizeSp * zoom)
                                                                         .coerceIn(6f, 90f)
                                                                 )
-                                                                acc = updated
-                                                                updateText(updated)
-                                                            },
-                                                            onGestureEnd = { acc = null }
-                                                        )
+                                                            )
+                                                        }
                                                     }
                                                     .clickable {
                                                         if (selectedTextId == element.id) {
