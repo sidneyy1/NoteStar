@@ -88,6 +88,8 @@ import com.riguel.notestar.data.Stroke as NoteStroke
 import java.io.File
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 private val pdfPenColors = listOf(
     Color.Black, Color(0xFF1565C0), Color(0xFF2E7D32),
@@ -416,25 +418,45 @@ fun PdfNoteScreen(
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 if (tool == Tool.TEXT) {
+                    val target = texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
                     Slider(
-                        value = texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
-                            ?.fontSizeSp ?: textSize,
+                        value = target?.fontSizeSp ?: textSize,
                         onValueChange = { v ->
-                            val target = texts.firstOrNull {
-                                it.id == (editingTextId ?: selectedTextId)
+                            if (target != null) {
+                                updateText(target.copy(fontSizeSp = v))
+                            } else {
+                                textSize = v
                             }
-                            if (target != null) updateText(target.copy(fontSizeSp = v)) else textSize = v
                         },
-                        valueRange = 8f..60f,
+                        valueRange = 6f..90f,
                         modifier = Modifier.weight(1f)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    NumericSizeField(
+                        value = target?.fontSizeSp ?: textSize,
+                        onApply = { v ->
+                            val clamped = v.coerceIn(6f, 90f)
+                            if (target != null) {
+                                updateText(target.copy(fontSizeSp = clamped))
+                            } else {
+                                textSize = clamped
+                            }
+                        }
+                    )
+                    Text("px", style = MaterialTheme.typography.bodySmall)
                 } else {
                     Slider(
                         value = thickness,
                         onValueChange = { thickness = it },
-                        valueRange = 2f..24f,
+                        valueRange = 1f..60f,
                         modifier = Modifier.weight(1f)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    NumericSizeField(
+                        value = thickness,
+                        onApply = { v -> thickness = v.coerceIn(1f, 60f) }
+                    )
+                    Text("px", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -474,24 +496,46 @@ fun PdfNoteScreen(
                     )
 
                     val gestureModifier = when (tool) {
-                        Tool.TEXT -> Modifier.pointerInput(tool) {
-                            detectTapGestures { screen ->
-                                when {
-                                    editingTextId != null -> commitEditing()
-                                    selectedTextId != null -> selectedTextId = null
-                                    else -> {
-                                        val point = toPdf(screen)
-                                        val element = TextElement(
-                                            id = System.nanoTime().toString(),
-                                            x = point.x,
-                                            y = point.y,
-                                            text = "",
-                                            colorValue = inkColor.value,
-                                            fontSizeSp = textSize
-                                        )
-                                        texts.add(element)
-                                        selectedTextId = element.id
-                                        editingTextId = element.id
+                        Tool.TEXT -> Modifier.pointerInput(tool, selectedTextId, editingTextId) {
+                            coroutineScope {
+                                launch {
+                                    detectTapGestures { screen ->
+                                        when {
+                                            editingTextId != null -> commitEditing()
+                                            selectedTextId != null -> selectedTextId = null
+                                            else -> {
+                                                val point = toPdf(screen)
+                                                val element = TextElement(
+                                                    id = System.nanoTime().toString(),
+                                                    x = point.x,
+                                                    y = point.y,
+                                                    text = "",
+                                                    colorValue = inkColor.value,
+                                                    fontSizeSp = textSize
+                                                )
+                                                texts.add(element)
+                                                selectedTextId = element.id
+                                                editingTextId = element.id
+                                            }
+                                        }
+                                    }
+                                }
+                                launch {
+                                    // Pinch anywhere on the page zooms the selected text.
+                                    detectTransformGestures { _, _, zoom, _ ->
+                                        if (zoom != 1f && editingTextId == null) {
+                                            val target = texts.firstOrNull {
+                                                it.id == selectedTextId
+                                            }
+                                            if (target != null) {
+                                                updateText(
+                                                    target.copy(
+                                                        fontSizeSp = (target.fontSizeSp * zoom)
+                                                            .coerceIn(6f, 90f)
+                                                    )
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
