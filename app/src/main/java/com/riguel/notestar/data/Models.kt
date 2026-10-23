@@ -3,6 +3,17 @@ package com.riguel.notestar.data
 /** Tools available in the editor. */
 enum class Tool { PEN, HIGHLIGHTER, TEXT, ERASER, MOVE }
 
+/** The three editor modes: select things, roam the canvas, or draw. */
+enum class EditorMode { SELECT, HAND, DRAW }
+
+/** Pen nib styles for the Pen tool. Stored by name in the note JSON. */
+object PenTypes {
+    const val PENCIL = "pencil"
+    const val PEN = "pen"
+    const val CALLIGRAPHY = "calligraphy"
+    val ALL = listOf(PENCIL, PEN, CALLIGRAPHY)
+}
+
 /** Page background. Built-in templates; user templates reuse these styles. */
 enum class PageTemplate { BLANK, LINED, DOTTED, PLANNER, LECTURE }
 
@@ -22,7 +33,8 @@ data class Stroke(
     val points: List<StrokePoint>,
     val colorValue: ULong,
     val thickness: Float,
-    val highlighter: Boolean
+    val highlighter: Boolean,
+    val penType: String = PenTypes.PEN
 )
 
 /** Font choices for typed text. Stored by name in the note JSON. */
