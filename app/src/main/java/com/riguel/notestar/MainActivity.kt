@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.riguel.notestar.data.NoteMeta
 import com.riguel.notestar.data.NoteStorage
+import com.riguel.notestar.data.PageTemplate
 import com.riguel.notestar.ui.EditorScreen
 import com.riguel.notestar.ui.HomeScreen
 
@@ -30,31 +31,40 @@ class MainActivity : ComponentActivity() {
 fun NoteStarApp() {
     val context = LocalContext.current
     var editingId by remember { mutableStateOf<String?>(null) }
-    var creatingNew by remember { mutableStateOf(false) }
+    var newTemplate by remember { mutableStateOf<PageTemplate?>(null) }
     var refresh by remember { mutableStateOf(0) }
 
     val notes = remember(refresh) { NoteStorage.listNotes(context) }
 
-    if (creatingNew || editingId != null) {
+    if (newTemplate != null || editingId != null) {
         val loaded = remember(editingId) {
             editingId?.let { NoteStorage.loadNote(context, it) }
         }
+        val template = loaded?.meta?.template ?: newTemplate ?: PageTemplate.BLANK
         EditorScreen(
-            initialTitle = loaded?.first?.title ?: "",
-            initialStrokes = loaded?.second ?: emptyList(),
+            initialTitle = loaded?.meta?.title ?: "",
+            initialTemplate = template,
+            initialStrokes = loaded?.strokes ?: emptyList(),
+            initialTexts = loaded?.texts ?: emptyList(),
             onBack = {
-                creatingNew = false
+                newTemplate = null
                 editingId = null
                 refresh++
             },
-            onSave = { title, strokes ->
+            onSave = { title, strokes, texts ->
                 val id = editingId ?: NoteStorage.newId()
                 NoteStorage.saveNote(
                     context,
-                    NoteMeta(id = id, title = title, updatedAt = System.currentTimeMillis()),
-                    strokes
+                    NoteMeta(
+                        id = id,
+                        title = title,
+                        updatedAt = System.currentTimeMillis(),
+                        template = template
+                    ),
+                    strokes,
+                    texts
                 )
-                creatingNew = false
+                newTemplate = null
                 editingId = null
                 refresh++
             }
@@ -62,7 +72,7 @@ fun NoteStarApp() {
     } else {
         HomeScreen(
             notes = notes,
-            onCreate = { creatingNew = true },
+            onCreate = { template -> newTemplate = template },
             onOpen = { id -> editingId = id },
             onDelete = { id ->
                 NoteStorage.deleteNote(context, id)
