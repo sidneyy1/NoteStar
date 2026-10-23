@@ -10,6 +10,17 @@ notebook list, and build installable APKs in the cloud with GitHub Actions.
 
 ## Features
 
+**v0.3**
+- Type directly on the page — no popup. Tap with the Text tool and the
+  keyboard opens; you type right where the text will live
+- Resizable text: pinch a text to resize it, drag to move, or use the
+  size slider while it's selected
+- Rich text: bold, italic, and font choice (Default, Serif, Sans, Mono,
+  Cursive) per text block
+- Hex color selector (#RRGGBB) next to the swatches, for pen, highlighter,
+  and text — any color you want
+- Clean icon ribbon: tools and actions are icons instead of word labels
+
 **v0.2**
 - Type on the page: Text tool — tap to add text, tap to edit, drag to move,
   adjustable text size and color
