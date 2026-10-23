@@ -823,24 +823,23 @@ fun EditorScreen(
                                                     shape = RoundedCornerShape(4.dp)
                                                 )
                                                 .pointerInput(element.id, viewScale) {
-                                                    var acc: TextElement? = null
-                                                    detectTransformGestures(
-                                                        onGestureStart = {
-                                                            acc = element
-                                                        },
-                                                        onGesture = { _, pan, zoom, _ ->
-                                                            val base = acc ?: element
-                                                            val updated = base.copy(
+                                                    // pan/zoom here are per-event changes, so
+                                                    // apply them to the freshest element state.
+                                                    detectTransformGestures { _, pan, zoom, _ ->
+                                                        val base = layersWork
+                                                            .firstOrNull { it.id == layer.id }
+                                                            ?.texts
+                                                            ?.firstOrNull { it.id == element.id }
+                                                            ?: element
+                                                        updateText(
+                                                            base.copy(
                                                                 x = base.x + pan.x / viewScale,
                                                                 y = base.y + pan.y / viewScale,
                                                                 fontSizeSp = (base.fontSizeSp * zoom)
                                                                     .coerceIn(10f, 120f)
                                                             )
-                                                            acc = updated
-                                                            updateText(updated)
-                                                        },
-                                                        onGestureEnd = { acc = null }
-                                                    )
+                                                        )
+                                                    }
                                                 }
                                                 .clickable {
                                                     if (selectedTextId == element.id) {
