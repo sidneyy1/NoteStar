@@ -21,14 +21,27 @@ data class Stroke(
     val highlighter: Boolean
 )
 
-/** A block of typed text placed on the page. */
+/** Font choices for typed text. Stored by name in the note JSON. */
+object TextFonts {
+    const val DEFAULT = "default"
+    const val SERIF = "serif"
+    const val SANS = "sans"
+    const val MONO = "mono"
+    const val CURSIVE = "cursive"
+    val ALL = listOf(DEFAULT, SERIF, SANS, MONO, CURSIVE)
+}
+
+/** A block of typed text placed on the page, with simple rich formatting. */
 data class TextElement(
     val id: String,
     val x: Float,
     val y: Float,
     val text: String,
     val colorValue: ULong,
-    val fontSizeSp: Float
+    val fontSizeSp: Float,
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    val fontFamilyName: String = TextFonts.DEFAULT
 )
 
 /** Lightweight info about a saved note, shown in the notebook list. */
