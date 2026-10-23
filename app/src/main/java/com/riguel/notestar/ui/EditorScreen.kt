@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Backspace
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
@@ -49,14 +50,17 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -92,22 +96,31 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.riguel.notestar.data.EditorMode
 import com.riguel.notestar.data.Layer
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PageTemplate
+import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
 import com.riguel.notestar.data.TextElement
 import com.riguel.notestar.data.TextFonts
 import com.riguel.notestar.data.Tool
 import com.riguel.notestar.data.Stroke as NoteStroke
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 private val penColors = listOf(
     Color.Black, Color(0xFF424242), Color(0xFF1565C0), Color(0xFF039BE5),
@@ -136,6 +149,12 @@ private fun fontLabel(name: String): String = when (name) {
     else -> "Default"
 }
 
+private fun penTypeLabel(name: String): String = when (name) {
+    PenTypes.PENCIL -> "Pencil"
+    PenTypes.CALLIGRAPHY -> "Calligraphy"
+    else -> "Pen"
+}
+
 fun textStyleFor(element: TextElement, scale: Float = 1f): TextStyle = TextStyle(
     color = Color(element.colorValue),
     fontSize = (element.fontSizeSp * scale).sp,
@@ -156,6 +175,32 @@ private fun parseHexColor(input: String): Color? {
     if (t.length != 6) return null
     val v = t.toLongOrNull(16) ?: return null
     return Color(0xFF000000.toInt() or v.toInt())
+}
+
+/**
+ * A small numeric field for setting a size exactly (type "10" = 10px),
+ * for when a slider is fiddly — e.g. a phone in portrait.
+ */
+@Composable
+internal fun NumericSizeField(
+    value: Float,
+    onApply: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var text by remember(value) { mutableStateOf(value.roundToInt().toString()) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it.filter { c -> c.isDigit() } },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Number,
+            imeAction = ImeAction.Done
+        ),
+        keyboardActions = KeyboardActions(
+            onDone = { text.toFloatOrNull()?.let { onApply(it) } }
+        ),
+        modifier = modifier.width(68.dp)
+    )
 }
 
 /** Editable working copy of a [Layer] while its page is open. */
@@ -189,6 +234,7 @@ fun EditorScreen(
     val compact = LocalConfiguration.current.screenWidthDp < 600
     val btnSize = if (compact) 38.dp else 48.dp
     val iconSize = if (compact) 20.dp else 24.dp
+
     val pagesState = remember {
         mutableStateListOf<Page>().apply { addAll(initialDoc.pages) }
     }
@@ -199,6 +245,7 @@ fun EditorScreen(
     var activeLayerId by remember { mutableStateOf<String?>(null) }
     var selectedTextId by remember { mutableStateOf<String?>(null) }
     var editingTextId by remember { mutableStateOf<String?>(null) }
+    var selectedStroke by remember { mutableStateOf<Pair<String, Int>?>(null) }
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
 
@@ -236,11 +283,14 @@ fun EditorScreen(
         loadWork(pagesState[index])
         selectedTextId = null
         editingTextId = null
+        selectedStroke = null
         viewScale = 1f
         viewOffset = Offset.Zero
     }
 
+    var mode by remember { mutableStateOf(EditorMode.DRAW) }
     var tool by remember { mutableStateOf(Tool.PEN) }
+    var penType by remember { mutableStateOf(PenTypes.PEN) }
     var inkColor by remember { mutableStateOf(Color.Black) }
     var thickness by remember { mutableStateOf(6f) }
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
@@ -305,6 +355,13 @@ fun EditorScreen(
         }
     }
 
+    fun setMode(newMode: EditorMode) {
+        commitEditing()
+        mode = newMode
+        if (newMode != EditorMode.SELECT) selectedStroke = null
+        if (newMode == EditorMode.HAND) selectedTextId = null
+    }
+
     fun eraseAt(point: StrokePoint) {
         val layer = activeLayer() ?: return
         if (layer.locked) return
@@ -315,6 +372,25 @@ fun EditorScreen(
                     (p.y - point.y).toDouble()
                 ) < 24.0 / viewScale
             }
+        }
+    }
+
+    fun deleteSelected() {
+        val sel = selectedStroke
+        if (sel != null) {
+            val layer = layersWork.firstOrNull { it.id == sel.first }
+            if (layer != null && sel.second in layer.strokes.indices) {
+                layer.strokes.removeAt(sel.second)
+            }
+            selectedStroke = null
+            return
+        }
+        val textId = selectedTextId
+        if (textId != null) {
+            for (layer in layersWork) {
+                layer.texts.removeAll { it.id == textId }
+            }
+            selectedTextId = null
         }
     }
 
@@ -372,110 +448,197 @@ fun EditorScreen(
                 }
             }
 
-            // Ribbon: tools
+            // Mode row: Select / Hand / Draw
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 4.dp),
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val toolIcons = listOf(
-                    Triple(Tool.PEN, Icons.Filled.Gesture, "Pen"),
-                    Triple(Tool.HIGHLIGHTER, Icons.Filled.FormatColorFill, "Highlighter"),
-                    Triple(Tool.TEXT, Icons.Filled.TextFields, "Text"),
-                    Triple(Tool.ERASER, Icons.Filled.Backspace, "Eraser"),
-                    Triple(Tool.MOVE, Icons.Filled.OpenWith, "Move / zoom")
+                val modes = listOf(
+                    Triple(EditorMode.SELECT, Icons.Filled.NearMe, "Select"),
+                    Triple(EditorMode.HAND, Icons.Filled.PanTool, "Hand"),
+                    Triple(EditorMode.DRAW, Icons.Filled.Brush, "Draw")
                 )
-                toolIcons.forEach { (t, icon, description) ->
+                modes.forEach { (m, icon, label) ->
+                    Row(
+                        modifier = Modifier
+                            .background(
+                                if (m == mode) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    Color.Transparent
+                                },
+                                RoundedCornerShape(50)
+                            )
+                            .clickable { setMode(m) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(icon, contentDescription = label, modifier = Modifier.size(iconSize))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(text = label, style = MaterialTheme.typography.labelLarge)
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+            }
+
+            // Draw sub-tools
+            if (mode == EditorMode.DRAW) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val toolIcons = listOf(
+                        Triple(Tool.PEN, Icons.Filled.Gesture, "Pen"),
+                        Triple(Tool.HIGHLIGHTER, Icons.Filled.FormatColorFill, "Highlighter"),
+                        Triple(Tool.TEXT, Icons.Filled.TextFields, "Text"),
+                        Triple(Tool.ERASER, Icons.Filled.Backspace, "Eraser")
+                    )
+                    toolIcons.forEach { (t, icon, description) ->
+                        IconButton(
+                            onClick = { selectTool(t) },
+                            modifier = Modifier
+                                .size(btnSize)
+                                .background(
+                                    if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                    CircleShape
+                                )
+                        ) {
+                            Icon(
+                                icon,
+                                contentDescription = description,
+                                modifier = Modifier.size(iconSize)
+                            )
+                        }
+                    }
                     IconButton(
-                        onClick = { selectTool(t) },
+                        onClick = { beautifyOn = !beautifyOn },
                         modifier = Modifier
                             .size(btnSize)
                             .background(
-                                if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                if (beautifyOn) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
                                 CircleShape
                             )
                     ) {
-                        Icon(icon, contentDescription = description, modifier = Modifier.size(iconSize))
-                    }
-                }
-                IconButton(
-                    onClick = { beautifyOn = !beautifyOn },
-                    modifier = Modifier
-                        .size(btnSize)
-                        .background(
-                            if (beautifyOn) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                            CircleShape
+                        Icon(
+                            Icons.Filled.AutoFixHigh,
+                            contentDescription = "Handwriting beautifier",
+                            modifier = Modifier.size(iconSize)
                         )
-                ) {
-                    Icon(
-                        Icons.Filled.AutoFixHigh,
-                        contentDescription = "Handwriting beautifier",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                IconButton(
-                    onClick = { paletteVisible = !paletteVisible },
-                    modifier = Modifier
-                        .size(btnSize)
-                        .background(
-                            if (paletteVisible) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                            CircleShape
+                    }
+                    IconButton(
+                        onClick = { paletteVisible = !paletteVisible },
+                        modifier = Modifier
+                            .size(btnSize)
+                            .background(
+                                if (paletteVisible) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                CircleShape
+                            )
+                    ) {
+                        Icon(
+                            Icons.Filled.Palette,
+                            contentDescription = "Show / hide colors",
+                            modifier = Modifier.size(iconSize)
                         )
-                ) {
-                    Icon(
-                        Icons.Filled.Palette,
-                        contentDescription = "Show / hide colors",
-                        modifier = Modifier.size(iconSize)
-                    )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    IconButton(
+                        modifier = Modifier.size(btnSize),
+                        onClick = {
+                            val layer = activeLayer()
+                            if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
+                                redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Undo,
+                            contentDescription = "Undo",
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                    IconButton(
+                        modifier = Modifier.size(btnSize),
+                        onClick = {
+                            val layer = activeLayer()
+                            if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
+                                layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Redo,
+                            contentDescription = "Redo",
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                    IconButton(
+                        modifier = Modifier.size(btnSize),
+                        onClick = {
+                            val layer = activeLayer()
+                            if (layer != null && !layer.locked) {
+                                layer.strokes.clear()
+                                redoStack.clear()
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Clear ink on layer",
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                IconButton(
-                    modifier = Modifier.size(btnSize),
-                    onClick = {
-                        val layer = activeLayer()
-                        if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
-                            redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
+
+                // Pen type picker (Pen tool only)
+                if (tool == Tool.PEN) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        PenTypes.ALL.forEach { type ->
+                            FilterChip(
+                                selected = penType == type,
+                                onClick = { penType = type },
+                                label = { Text(penTypeLabel(type)) }
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
                     }
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Undo,
-                        contentDescription = "Undo",
-                        modifier = Modifier.size(iconSize)
-                    )
                 }
-                IconButton(
-                    modifier = Modifier.size(btnSize),
-                    onClick = {
-                        val layer = activeLayer()
-                        if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
-                            layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
-                        }
-                    }
+            }
+
+            // Select mode actions
+            if (mode == EditorMode.SELECT) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Redo,
-                        contentDescription = "Redo",
-                        modifier = Modifier.size(iconSize)
+                    Text(
+                        text = "Tap ink or text to select it, then drag to move it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
                     )
-                }
-                IconButton(
-                    modifier = Modifier.size(btnSize),
-                    onClick = {
-                        val layer = activeLayer()
-                        if (layer != null && !layer.locked) {
-                            layer.strokes.clear()
-                            redoStack.clear()
-                        }
+                    IconButton(
+                        onClick = { deleteSelected() },
+                        modifier = Modifier.size(btnSize),
+                        enabled = selectedStroke != null || selectedTextId != null
+                    ) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Delete selection",
+                            modifier = Modifier.size(iconSize)
+                        )
                     }
-                ) {
-                    Icon(
-                        Icons.Filled.Delete,
-                        contentDescription = "Clear ink on layer",
-                        modifier = Modifier.size(iconSize)
-                    )
                 }
             }
 
@@ -553,7 +716,7 @@ fun EditorScreen(
             }
 
             // Rich text formatting bar
-            if (tool == Tool.TEXT) {
+            if (mode == EditorMode.DRAW && tool == Tool.TEXT) {
                 val target = activeText()
                 val boldActive = target?.bold ?: newTextBold
                 val italicActive = target?.italic ?: newTextItalic
@@ -621,7 +784,7 @@ fun EditorScreen(
                 }
                 if (!compact) {
                     Text(
-                        text = "Tap the page to type. Tap text to select, tap again to edit. Pinch a text to resize it.",
+                        text = "Tap the page to type. Tap text to select, tap again to edit. Pinch to resize it, or pinch the page to zoom a selected text.",
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
@@ -629,8 +792,8 @@ fun EditorScreen(
             }
 
             // Palette + size + hex (toggle with the palette button; also
-            // hidden while erasing or moving)
-            if (paletteVisible && tool != Tool.ERASER && tool != Tool.MOVE) {
+            // hidden while erasing)
+            if (mode == EditorMode.DRAW && paletteVisible && tool != Tool.ERASER) {
                 val palette = if (tool == Tool.HIGHLIGHTER) highlighterColors else penColors
                 Row(
                     modifier = Modifier
@@ -664,16 +827,35 @@ fun EditorScreen(
                                 if (target != null) updateText(target.copy(fontSizeSp = v))
                                 else newTextSize = v
                             },
-                            valueRange = 10f..80f,
+                            valueRange = 10f..120f,
                             modifier = Modifier.weight(1f)
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        NumericSizeField(
+                            value = target?.fontSizeSp ?: newTextSize,
+                            onApply = { v ->
+                                val clamped = v.coerceIn(10f, 120f)
+                                if (target != null) {
+                                    updateText(target.copy(fontSizeSp = clamped))
+                                } else {
+                                    newTextSize = clamped
+                                }
+                            }
+                        )
+                        Text("px", style = MaterialTheme.typography.bodySmall)
                     } else {
                         Slider(
                             value = thickness,
                             onValueChange = { thickness = it },
-                            valueRange = 2f..28f,
+                            valueRange = 1f..60f,
                             modifier = Modifier.weight(1f)
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        NumericSizeField(
+                            value = thickness,
+                            onApply = { v -> thickness = v.coerceIn(1f, 60f) }
+                        )
+                        Text("px", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 Row(
@@ -734,8 +916,8 @@ fun EditorScreen(
                 pressure = pressure
             )
 
-            val gestureModifier = when (tool) {
-                Tool.MOVE -> Modifier.pointerInput(tool) {
+            val gestureModifier = when (mode) {
+                EditorMode.HAND -> Modifier.pointerInput(mode) {
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         val newScale = (viewScale * zoom).coerceIn(0.3f, 4f)
                         val factor = newScale / viewScale
@@ -746,100 +928,189 @@ fun EditorScreen(
                         viewScale = newScale
                     }
                 }
-                Tool.TEXT -> Modifier.pointerInput(tool) {
-                    detectTapGestures { screen ->
-                        when {
-                            editingTextId != null -> commitEditing()
-                            selectedTextId != null -> selectedTextId = null
-                            else -> {
-                                val layer = activeLayer()
-                                if (layer != null && !layer.locked) {
-                                    val point = toPage(screen)
-                                    val element = TextElement(
-                                        id = System.nanoTime().toString(),
-                                        x = point.x,
-                                        y = point.y,
-                                        text = "",
-                                        colorValue = inkColor.value,
-                                        fontSizeSp = newTextSize,
-                                        bold = newTextBold,
-                                        italic = newTextItalic,
-                                        fontFamilyName = newTextFont
-                                    )
-                                    layer.texts.add(element)
-                                    selectedTextId = element.id
-                                    editingTextId = element.id
+                EditorMode.SELECT -> Modifier.pointerInput(mode) {
+                    coroutineScope {
+                        launch {
+                            detectTapGestures { screen ->
+                                val pagePoint = toPage(screen)
+                                var found: Pair<String, Int>? = null
+                                for (layer in layersWork.asReversed()) {
+                                    if (!layer.visible) continue
+                                    for (i in layer.strokes.indices.reversed()) {
+                                        val s = layer.strokes[i]
+                                        val hit = s.points.any { p ->
+                                            hypot(
+                                                (p.x - pagePoint.x).toDouble(),
+                                                (p.y - pagePoint.y).toDouble()
+                                            ) < 28.0 / viewScale
+                                        }
+                                        if (hit) {
+                                            found = layer.id to i
+                                            break
+                                        }
+                                    }
+                                    if (found != null) break
+                                }
+                                selectedStroke = found
+                                if (found != null) {
+                                    selectedTextId = null
+                                    activeLayerId = found.first
+                                } else {
+                                    selectedTextId = null
+                                }
+                            }
+                        }
+                        launch {
+                            detectDragGestures(
+                                onDragStart = { },
+                                onDragEnd = { },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    val sel = selectedStroke
+                                    if (sel != null) {
+                                        val layer = layersWork.firstOrNull { it.id == sel.first }
+                                        val idx = sel.second
+                                        if (layer != null && idx in layer.strokes.indices) {
+                                            val s = layer.strokes[idx]
+                                            val dx = dragAmount.x / viewScale
+                                            val dy = dragAmount.y / viewScale
+                                            layer.strokes[idx] = s.copy(
+                                                points = s.points.map { p ->
+                                                    p.copy(x = p.x + dx, y = p.y + dy)
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                EditorMode.DRAW -> when (tool) {
+                    Tool.TEXT -> Modifier.pointerInput(tool, selectedTextId, editingTextId) {
+                        coroutineScope {
+                            launch {
+                                detectTapGestures { screen ->
+                                    when {
+                                        editingTextId != null -> commitEditing()
+                                        selectedTextId != null -> selectedTextId = null
+                                        else -> {
+                                            val layer = activeLayer()
+                                            if (layer != null && !layer.locked) {
+                                                val point = toPage(screen)
+                                                val element = TextElement(
+                                                    id = System.nanoTime().toString(),
+                                                    x = point.x,
+                                                    y = point.y,
+                                                    text = "",
+                                                    colorValue = inkColor.value,
+                                                    fontSizeSp = newTextSize,
+                                                    bold = newTextBold,
+                                                    italic = newTextItalic,
+                                                    fontFamilyName = newTextFont
+                                                )
+                                                layer.texts.add(element)
+                                                selectedTextId = element.id
+                                                editingTextId = element.id
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            launch {
+                                // Pinch anywhere on the page zooms the selected text.
+                                detectTransformGestures { _, _, zoom, _ ->
+                                    if (zoom != 1f && editingTextId == null) {
+                                        val target = activeText()
+                                        if (target != null) {
+                                            updateText(
+                                                target.copy(
+                                                    fontSizeSp = (target.fontSizeSp * zoom)
+                                                        .coerceIn(10f, 120f)
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                else -> Modifier.pointerInput(tool, inkColor, thickness) {
-                    detectDragGestures(
-                        onDragStart = { screen ->
-                            val layer = activeLayer()
-                            if (layer != null && !layer.locked) {
-                                val point = toPage(screen)
-                                if (tool == Tool.ERASER) {
-                                    eraseAt(point)
-                                } else {
-                                    currentPoints = listOf(point)
-                                }
-                            }
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            val layer = activeLayer()
-                            if (layer != null && !layer.locked) {
-                                val point = toPage(change.position, change.pressure.coerceIn(0.1f, 1f))
-                                if (tool == Tool.ERASER) {
-                                    eraseAt(point)
-                                } else if (currentPoints.isNotEmpty()) {
-                                    // Give the first point a real pressure too.
-                                    currentPoints = if (currentPoints.size == 1) {
-                                        listOf(
-                                            currentPoints.first().copy(pressure = point.pressure),
-                                            point
-                                        )
+                    else -> Modifier.pointerInput(tool, inkColor, thickness, penType) {
+                        detectDragGestures(
+                            onDragStart = { screen ->
+                                val layer = activeLayer()
+                                if (layer != null && !layer.locked) {
+                                    val point = toPage(screen)
+                                    if (tool == Tool.ERASER) {
+                                        eraseAt(point)
                                     } else {
-                                        currentPoints + point
+                                        currentPoints = listOf(point)
                                     }
                                 }
-                            }
-                        },
-                        onDragEnd = {
-                            val layer = activeLayer()
-                            if (tool != Tool.ERASER && layer != null && !layer.locked &&
-                                currentPoints.isNotEmpty()
-                            ) {
-                                val rawPoints = if (currentPoints.size == 1) {
-                                    val only = currentPoints.first()
-                                    currentPoints + only.copy(x = only.x + 0.1f)
-                                } else {
-                                    currentPoints
-                                }
-                                val finalPoints = if (beautifyOn) {
-                                    StrokeGeometry.beautify(rawPoints)
-                                } else {
-                                    rawPoints
-                                }
-                                layer.strokes.add(
-                                    NoteStroke(
-                                        points = finalPoints,
-                                        colorValue = inkColor.value,
-                                        thickness = thickness,
-                                        highlighter = tool == Tool.HIGHLIGHTER
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                val layer = activeLayer()
+                                if (layer != null && !layer.locked) {
+                                    val point = toPage(
+                                        change.position,
+                                        change.pressure.coerceIn(0.1f, 1f)
                                     )
-                                )
-                                redoStack.clear()
-                                undoStack.clear()
+                                    if (tool == Tool.ERASER) {
+                                        eraseAt(point)
+                                    } else if (currentPoints.isNotEmpty()) {
+                                        // Give the first point a real pressure too.
+                                        currentPoints = if (currentPoints.size == 1) {
+                                            listOf(
+                                                currentPoints.first().copy(pressure = point.pressure),
+                                                point
+                                            )
+                                        } else {
+                                            currentPoints + point
+                                        }
+                                    }
+                                }
+                            },
+                            onDragEnd = {
+                                val layer = activeLayer()
+                                if (tool != Tool.ERASER && layer != null && !layer.locked &&
+                                    currentPoints.isNotEmpty()
+                                ) {
+                                    val rawPoints = if (currentPoints.size == 1) {
+                                        val only = currentPoints.first()
+                                        currentPoints + only.copy(x = only.x + 0.1f)
+                                    } else {
+                                        currentPoints
+                                    }
+                                    val finalPoints = if (beautifyOn) {
+                                        StrokeGeometry.beautify(rawPoints)
+                                    } else {
+                                        rawPoints
+                                    }
+                                    layer.strokes.add(
+                                        NoteStroke(
+                                            points = finalPoints,
+                                            colorValue = inkColor.value,
+                                            thickness = thickness,
+                                            highlighter = tool == Tool.HIGHLIGHTER,
+                                            penType = if (tool == Tool.PEN) {
+                                                penType
+                                            } else {
+                                                PenTypes.PEN
+                                            }
+                                        )
+                                    )
+                                    redoStack.clear()
+                                    undoStack.clear()
+                                }
+                                currentPoints = emptyList()
                             }
-                            currentPoints = emptyList()
-                        }
-                    )
+                        )
+                    }
                 }
             }
 
+            val selectionColor = MaterialTheme.colorScheme.primary
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
@@ -856,15 +1127,41 @@ fun EditorScreen(
                             drawStrokeSmooth(stroke)
                         }
                     }
-                    if (currentPoints.isNotEmpty() && tool != Tool.ERASER && tool != Tool.TEXT) {
+                    if (currentPoints.isNotEmpty() && mode == EditorMode.DRAW &&
+                        tool != Tool.ERASER && tool != Tool.TEXT
+                    ) {
                         drawStrokeSmooth(
                             NoteStroke(
                                 points = currentPoints,
                                 colorValue = inkColor.value,
                                 thickness = thickness,
-                                highlighter = tool == Tool.HIGHLIGHTER
+                                highlighter = tool == Tool.HIGHLIGHTER,
+                                penType = if (tool == Tool.PEN) penType else PenTypes.PEN
                             )
                         )
+                    }
+                    // Selection box around the selected stroke (Select mode)
+                    if (mode == EditorMode.SELECT) {
+                        val sel = selectedStroke
+                        if (sel != null) {
+                            val layer = layersWork.firstOrNull { it.id == sel.first }
+                            val s = layer?.strokes?.getOrNull(sel.second)
+                            if (s != null && s.points.isNotEmpty()) {
+                                val minX = s.points.minOf { it.x } - 14f
+                                val minY = s.points.minOf { it.y } - 14f
+                                val maxX = s.points.maxOf { it.x } + 14f
+                                val maxY = s.points.maxOf { it.y } + 14f
+                                drawRect(
+                                    color = selectionColor,
+                                    topLeft = Offset(minX, minY),
+                                    size = androidx.compose.ui.geometry.Size(
+                                        maxX - minX,
+                                        maxY - minY
+                                    ),
+                                    style = Stroke(width = 2f / viewScale)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -902,14 +1199,17 @@ fun EditorScreen(
                                     .padding(6.dp)
                             )
                         } else {
+                            val textInteractive = editingTextId == null && !layer.locked &&
+                                (
+                                    mode == EditorMode.SELECT ||
+                                        (mode == EditorMode.DRAW && tool == Tool.TEXT && isActiveLayer)
+                                    )
                             Text(
                                 text = element.text,
                                 style = textStyleFor(element, viewScale),
                                 modifier = position
                                     .then(
-                                        if (tool == Tool.TEXT && editingTextId == null &&
-                                            isActiveLayer && !layer.locked
-                                        ) {
+                                        if (textInteractive) {
                                             Modifier
                                                 .background(
                                                     if (isSelected) Color(0x143D5AFE) else Color.Transparent,
@@ -925,8 +1225,8 @@ fun EditorScreen(
                                                     shape = RoundedCornerShape(4.dp)
                                                 )
                                                 .pointerInput(element.id, viewScale) {
-                                                    // pan/zoom here are per-event changes, so
-                                                    // apply them to the freshest element state.
+                                                    // pan/zoom are per-event changes, so
+                                                    // apply them to the freshest state.
                                                     detectTransformGestures { _, pan, zoom, _ ->
                                                         val base = layersWork
                                                             .firstOrNull { it.id == layer.id }
@@ -944,7 +1244,11 @@ fun EditorScreen(
                                                     }
                                                 }
                                                 .clickable {
-                                                    if (selectedTextId == element.id) {
+                                                    if (mode == EditorMode.SELECT) {
+                                                        selectedTextId = element.id
+                                                        activeLayerId = layer.id
+                                                        selectedStroke = null
+                                                    } else if (selectedTextId == element.id) {
                                                         editingTextId = element.id
                                                     } else {
                                                         selectedTextId = element.id
@@ -1036,6 +1340,7 @@ fun EditorScreen(
                             TextButton(onClick = {
                                 activeLayerId = layer.id
                                 selectedTextId = element.id
+                                if (mode != EditorMode.DRAW) mode = EditorMode.DRAW
                                 if (tool != Tool.TEXT) tool = Tool.TEXT
                                 showOutline = false
                             }) {
@@ -1163,20 +1468,37 @@ private fun LayersDialog(
     )
 }
 
-/** Draw one stroke as smooth, pressure-aware segments. */
+/** Draw one stroke as smooth segments, shaped by its pen type. */
 internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawStrokeSmooth(stroke: NoteStroke) {
-    val points = StrokeGeometry.smoothed(stroke.points)
+    val isPencil = stroke.penType == PenTypes.PENCIL && !stroke.highlighter
+    val isCalligraphy = stroke.penType == PenTypes.CALLIGRAPHY && !stroke.highlighter
+    val points = if (isPencil) {
+        // Pencil keeps its grain: only light jitter filtering, no smoothing.
+        StrokeGeometry.filterJitter(stroke.points, minDistance = 0.8f)
+    } else {
+        StrokeGeometry.smoothed(stroke.points)
+    }
     if (points.size < 2) return
     val baseColor = Color(stroke.colorValue)
-    val drawColor = if (stroke.highlighter) baseColor.copy(alpha = 0.35f) else baseColor
+    val drawColor = when {
+        stroke.highlighter -> baseColor.copy(alpha = 0.35f)
+        isPencil -> baseColor.copy(alpha = 0.85f)
+        else -> baseColor
+    }
+    val nibAngle = PI / 4.0 // 45-degree broad nib for calligraphy
     for (i in 0 until points.size - 1) {
         val a = points[i]
         val b = points[i + 1]
         val avgPressure = (a.pressure + b.pressure) / 2f
-        val width = if (stroke.highlighter) {
-            stroke.thickness
-        } else {
-            stroke.thickness * (0.3f + 0.7f * avgPressure)
+        val width = when {
+            stroke.highlighter -> stroke.thickness
+            isPencil -> stroke.thickness * 0.55f * (0.4f + 0.6f * avgPressure)
+            isCalligraphy -> {
+                val angle = atan2((b.y - a.y).toDouble(), (b.x - a.x).toDouble())
+                val f = 0.15f + 0.85f * abs(sin(angle - nibAngle)).toFloat()
+                stroke.thickness * 1.7f * f
+            }
+            else -> stroke.thickness * (0.3f + 0.7f * avgPressure)
         }
         drawLine(
             color = drawColor,
