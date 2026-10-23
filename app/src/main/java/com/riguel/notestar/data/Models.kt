@@ -1,13 +1,17 @@
 package com.riguel.notestar.data
 
 /** Tools available in the editor. */
-enum class Tool { PEN, HIGHLIGHTER, TEXT, ERASER }
+enum class Tool { PEN, HIGHLIGHTER, TEXT, ERASER, MOVE }
 
-/** Page background chosen when a note is created. */
-enum class PageTemplate { BLANK, LINED }
+/** Page background. Built-in templates; user templates reuse these styles. */
+enum class PageTemplate { BLANK, LINED, DOTTED, PLANNER, LECTURE }
 
-/** One point along a stroke, in canvas coordinates. */
-data class StrokePoint(val x: Float, val y: Float)
+/** One point along a stroke, in page coordinates. Pressure is 0..1. */
+data class StrokePoint(
+    val x: Float,
+    val y: Float,
+    val pressure: Float = 1f
+)
 
 /**
  * A single drawn stroke.
@@ -44,17 +48,58 @@ data class TextElement(
     val fontFamilyName: String = TextFonts.DEFAULT
 )
 
+/** A named layer of ink + text. List order is back-to-front. */
+data class Layer(
+    val id: String,
+    val name: String,
+    val visible: Boolean = true,
+    val locked: Boolean = false,
+    val strokes: List<Stroke> = emptyList(),
+    val texts: List<TextElement> = emptyList()
+) {
+    companion object {
+        fun create(name: String): Layer =
+            Layer(id = "l" + System.nanoTime().toString(), name = name)
+    }
+}
+
+/** One page of a note. For PDF notes, [pdfPageIndex] links to a PDF page. */
+data class Page(
+    val id: String,
+    val template: PageTemplate = PageTemplate.BLANK,
+    val pdfPageIndex: Int? = null,
+    val layers: List<Layer> = listOf(Layer.create("Layer 1"))
+) {
+    companion object {
+        fun create(template: PageTemplate): Page =
+            Page(id = "p" + System.nanoTime().toString(), template = template)
+    }
+}
+
+/** An imported PDF stored in the app's private files. Never modified. */
+data class PdfAttachment(
+    val fileName: String,
+    val pageCount: Int
+)
+
+/** A complete note: the unit saved as one JSON file. */
+data class NoteDocument(
+    val id: String,
+    val title: String,
+    val tags: List<String> = emptyList(),
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L,
+    val pdf: PdfAttachment? = null,
+    val pages: List<Page> = listOf(Page.create(PageTemplate.BLANK))
+)
+
 /** Lightweight info about a saved note, shown in the notebook list. */
 data class NoteMeta(
     val id: String,
     val title: String,
     val updatedAt: Long,
-    val template: PageTemplate = PageTemplate.BLANK
-)
-
-/** A fully loaded note: metadata plus everything drawn/typed on the page. */
-data class LoadedNote(
-    val meta: NoteMeta,
-    val strokes: List<Stroke>,
-    val texts: List<TextElement>
+    val template: PageTemplate = PageTemplate.BLANK,
+    val tags: List<String> = emptyList(),
+    val isPdf: Boolean = false,
+    val pageCount: Int = 1
 )
