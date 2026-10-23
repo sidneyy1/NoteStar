@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.FormatColorFill
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TextFields
@@ -71,6 +72,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.IntOffset
@@ -150,6 +152,12 @@ fun PdfNoteScreen(
             )
         }
     }
+
+    // Compact chrome on phones so the PDF page stays visible.
+    val compact = LocalConfiguration.current.screenWidthDp < 600
+    val btnSize = if (compact) 38.dp else 48.dp
+    val iconSize = if (compact) 20.dp else 24.dp
+    var paletteVisible by remember { mutableStateOf(!compact) }
 
     var tool by remember { mutableStateOf(Tool.PEN) }
     var inkColor by remember { mutableStateOf(Color.Black) }
@@ -328,25 +336,56 @@ fun PdfNoteScreen(
                             inkColor = Color.Black
                         }
                     },
-                    modifier = Modifier.background(
-                        if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                        CircleShape
-                    )
+                    modifier = Modifier
+                        .size(btnSize)
+                        .background(
+                            if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                            CircleShape
+                        )
                 ) {
-                    Icon(icon, contentDescription = description)
+                    Icon(icon, contentDescription = description, modifier = Modifier.size(iconSize))
                 }
             }
-            IconButton(onClick = {
-                if (strokes.isNotEmpty()) strokes.removeAt(strokes.lastIndex)
-            }) {
-                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
+            IconButton(
+                onClick = { paletteVisible = !paletteVisible },
+                modifier = Modifier
+                    .size(btnSize)
+                    .background(
+                        if (paletteVisible) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                        CircleShape
+                    )
+            ) {
+                Icon(
+                    Icons.Filled.Palette,
+                    contentDescription = "Show / hide colors",
+                    modifier = Modifier.size(iconSize)
+                )
             }
-            IconButton(onClick = { strokes.clear(); texts.clear() }) {
-                Icon(Icons.Filled.Delete, contentDescription = "Clear page annotations")
+            IconButton(
+                modifier = Modifier.size(btnSize),
+                onClick = {
+                    if (strokes.isNotEmpty()) strokes.removeAt(strokes.lastIndex)
+                }
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Undo,
+                    contentDescription = "Undo",
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+            IconButton(
+                modifier = Modifier.size(btnSize),
+                onClick = { strokes.clear(); texts.clear() }
+            ) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "Clear page annotations",
+                    modifier = Modifier.size(iconSize)
+                )
             }
         }
 
-        if (tool != Tool.ERASER) {
+        if (paletteVisible && tool != Tool.ERASER) {
             val palette = if (tool == Tool.HIGHLIGHTER) pdfHighlighterColors else pdfPenColors
             Row(
                 modifier = Modifier
