@@ -23,33 +23,39 @@ object NoteStorage {
 
     fun newId(): String = System.currentTimeMillis().toString()
 
+    private fun readMeta(json: JSONObject, fallbackTime: Long): NoteMeta {
+        val template = try {
+            PageTemplate.valueOf(json.optString("template", PageTemplate.BLANK.name))
+        } catch (e: Exception) {
+            PageTemplate.BLANK
+        }
+        return NoteMeta(
+            id = json.getString("id"),
+            title = json.optString("title", "Untitled"),
+            updatedAt = json.optLong("updatedAt", fallbackTime),
+            template = template
+        )
+    }
+
     fun listNotes(context: Context): List<NoteMeta> {
         val files = notesDir(context).listFiles { f -> f.extension == "json" }
             ?: return emptyList()
         return files.mapNotNull { file ->
             try {
-                val json = JSONObject(file.readText())
-                NoteMeta(
-                    id = json.getString("id"),
-                    title = json.optString("title", "Untitled"),
-                    updatedAt = json.optLong("updatedAt", file.lastModified())
-                )
+                readMeta(JSONObject(file.readText()), file.lastModified())
             } catch (e: Exception) {
                 null
             }
         }.sortedByDescending { it.updatedAt }
     }
 
-    fun loadNote(context: Context, id: String): Pair<NoteMeta, List<Stroke>>? {
+    fun loadNote(context: Context, id: String): LoadedNote? {
         val file = noteFile(context, id)
         if (!file.exists()) return null
         return try {
             val json = JSONObject(file.readText())
-            val meta = NoteMeta(
-                id = json.getString("id"),
-                title = json.optString("title", "Untitled"),
-                updatedAt = json.optLong("updatedAt", file.lastModified())
-            )
+            val meta = readMeta(json, file.lastModified())
+
             val strokesJson = json.optJSONArray("strokes") ?: JSONArray()
             val strokes = mutableListOf<Stroke>()
             for (i in 0 until strokesJson.length()) {
@@ -69,17 +75,41 @@ object NoteStorage {
                     )
                 )
             }
-            meta to strokes
+
+            val textsJson = json.optJSONArray("texts") ?: JSONArray()
+            val texts = mutableListOf<TextElement>()
+            for (i in 0 until textsJson.length()) {
+                val t = textsJson.getJSONObject(i)
+                texts.add(
+                    TextElement(
+                        id = t.getString("id"),
+                        x = t.getDouble("x").toFloat(),
+                        y = t.getDouble("y").toFloat(),
+                        text = t.optString("text", ""),
+                        colorValue = t.getString("color").toULong(),
+                        fontSizeSp = t.optDouble("size", 20.0).toFloat()
+                    )
+                )
+            }
+
+            LoadedNote(meta = meta, strokes = strokes, texts = texts)
         } catch (e: Exception) {
             null
         }
     }
 
-    fun saveNote(context: Context, meta: NoteMeta, strokes: List<Stroke>) {
+    fun saveNote(
+        context: Context,
+        meta: NoteMeta,
+        strokes: List<Stroke>,
+        texts: List<TextElement>
+    ) {
         val json = JSONObject()
         json.put("id", meta.id)
         json.put("title", meta.title)
         json.put("updatedAt", meta.updatedAt)
+        json.put("template", meta.template.name)
+
         val strokesJson = JSONArray()
         for (stroke in strokes) {
             val s = JSONObject()
@@ -97,6 +127,20 @@ object NoteStorage {
             strokesJson.put(s)
         }
         json.put("strokes", strokesJson)
+
+        val textsJson = JSONArray()
+        for (element in texts) {
+            val t = JSONObject()
+            t.put("id", element.id)
+            t.put("x", element.x.toDouble())
+            t.put("y", element.y.toDouble())
+            t.put("text", element.text)
+            t.put("color", element.colorValue.toString())
+            t.put("size", element.fontSizeSp.toDouble())
+            textsJson.put(t)
+        }
+        json.put("texts", textsJson)
+
         noteFile(context, meta.id).writeText(json.toString())
     }
 
