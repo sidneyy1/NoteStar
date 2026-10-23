@@ -87,7 +87,10 @@ object NoteStorage {
                         y = t.getDouble("y").toFloat(),
                         text = t.optString("text", ""),
                         colorValue = t.getString("color").toULong(),
-                        fontSizeSp = t.optDouble("size", 20.0).toFloat()
+                        fontSizeSp = t.optDouble("size", 20.0).toFloat(),
+                        bold = t.optBoolean("bold", false),
+                        italic = t.optBoolean("italic", false),
+                        fontFamilyName = t.optString("font", TextFonts.DEFAULT)
                     )
                 )
             }
@@ -137,6 +140,9 @@ object NoteStorage {
             t.put("text", element.text)
             t.put("color", element.colorValue.toString())
             t.put("size", element.fontSizeSp.toDouble())
+            t.put("bold", element.bold)
+            t.put("italic", element.italic)
+            t.put("font", element.fontFamilyName)
             textsJson.put(t)
         }
         json.put("texts", textsJson)
