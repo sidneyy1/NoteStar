@@ -1,14 +1,17 @@
 package com.riguel.notestar.data
 
 import android.content.Context
-import org.json.JSONArray
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
 
 /**
- * Saves notes as JSON files in the app's private storage:
- *   files/notes/<id>.json
- * No account or network needed; everything stays on the device.
+ * File IO for notes. Format knowledge lives in [NoteJson]; this object only
+ * knows where files live:
+ *   files/notes/<id>.json  — one JSON file per note
+ *   files/pdfs/<fileName>  — imported PDFs (originals, never modified)
  */
 object NoteStorage {
 
@@ -18,140 +21,108 @@ object NoteStorage {
         return dir
     }
 
+    private fun pdfsDir(context: Context): File {
+        val dir = File(context.filesDir, "pdfs")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
     private fun noteFile(context: Context, id: String): File =
         File(notesDir(context), "$id.json")
 
-    fun newId(): String = System.currentTimeMillis().toString()
+    fun pdfFile(context: Context, fileName: String): File =
+        File(pdfsDir(context), fileName)
 
-    private fun readMeta(json: JSONObject, fallbackTime: Long): NoteMeta {
-        val template = try {
-            PageTemplate.valueOf(json.optString("template", PageTemplate.BLANK.name))
-        } catch (e: Exception) {
-            PageTemplate.BLANK
-        }
-        return NoteMeta(
-            id = json.getString("id"),
-            title = json.optString("title", "Untitled"),
-            updatedAt = json.optLong("updatedAt", fallbackTime),
-            template = template
-        )
-    }
+    fun newId(): String = System.currentTimeMillis().toString()
 
     fun listNotes(context: Context): List<NoteMeta> {
         val files = notesDir(context).listFiles { f -> f.extension == "json" }
             ?: return emptyList()
         return files.mapNotNull { file ->
             try {
-                readMeta(JSONObject(file.readText()), file.lastModified())
+                val doc = NoteJson.fromJson(JSONObject(file.readText()))
+                NoteMeta(
+                    id = doc.id,
+                    title = doc.title,
+                    updatedAt = doc.updatedAt,
+                    template = doc.pages.firstOrNull()?.template ?: PageTemplate.BLANK,
+                    tags = doc.tags,
+                    isPdf = doc.pdf != null,
+                    pageCount = doc.pages.size
+                )
             } catch (e: Exception) {
                 null
             }
         }.sortedByDescending { it.updatedAt }
     }
 
-    fun loadNote(context: Context, id: String): LoadedNote? {
+    fun loadNote(context: Context, id: String): NoteDocument? {
         val file = noteFile(context, id)
         if (!file.exists()) return null
         return try {
-            val json = JSONObject(file.readText())
-            val meta = readMeta(json, file.lastModified())
-
-            val strokesJson = json.optJSONArray("strokes") ?: JSONArray()
-            val strokes = mutableListOf<Stroke>()
-            for (i in 0 until strokesJson.length()) {
-                val s = strokesJson.getJSONObject(i)
-                val pointsJson = s.getJSONArray("points")
-                val points = mutableListOf<StrokePoint>()
-                for (j in 0 until pointsJson.length()) {
-                    val p = pointsJson.getJSONArray(j)
-                    points.add(StrokePoint(p.getDouble(0).toFloat(), p.getDouble(1).toFloat()))
-                }
-                strokes.add(
-                    Stroke(
-                        points = points,
-                        colorValue = s.getString("color").toULong(),
-                        thickness = s.getDouble("thickness").toFloat(),
-                        highlighter = s.optBoolean("highlighter", false)
-                    )
-                )
-            }
-
-            val textsJson = json.optJSONArray("texts") ?: JSONArray()
-            val texts = mutableListOf<TextElement>()
-            for (i in 0 until textsJson.length()) {
-                val t = textsJson.getJSONObject(i)
-                texts.add(
-                    TextElement(
-                        id = t.getString("id"),
-                        x = t.getDouble("x").toFloat(),
-                        y = t.getDouble("y").toFloat(),
-                        text = t.optString("text", ""),
-                        colorValue = t.getString("color").toULong(),
-                        fontSizeSp = t.optDouble("size", 20.0).toFloat(),
-                        bold = t.optBoolean("bold", false),
-                        italic = t.optBoolean("italic", false),
-                        fontFamilyName = t.optString("font", TextFonts.DEFAULT)
-                    )
-                )
-            }
-
-            LoadedNote(meta = meta, strokes = strokes, texts = texts)
+            NoteJson.fromJson(JSONObject(file.readText()))
         } catch (e: Exception) {
             null
         }
     }
 
-    fun saveNote(
-        context: Context,
-        meta: NoteMeta,
-        strokes: List<Stroke>,
-        texts: List<TextElement>
-    ) {
-        val json = JSONObject()
-        json.put("id", meta.id)
-        json.put("title", meta.title)
-        json.put("updatedAt", meta.updatedAt)
-        json.put("template", meta.template.name)
-
-        val strokesJson = JSONArray()
-        for (stroke in strokes) {
-            val s = JSONObject()
-            s.put("color", stroke.colorValue.toString())
-            s.put("thickness", stroke.thickness.toDouble())
-            s.put("highlighter", stroke.highlighter)
-            val pointsJson = JSONArray()
-            for (point in stroke.points) {
-                val p = JSONArray()
-                p.put(point.x.toDouble())
-                p.put(point.y.toDouble())
-                pointsJson.put(p)
-            }
-            s.put("points", pointsJson)
-            strokesJson.put(s)
-        }
-        json.put("strokes", strokesJson)
-
-        val textsJson = JSONArray()
-        for (element in texts) {
-            val t = JSONObject()
-            t.put("id", element.id)
-            t.put("x", element.x.toDouble())
-            t.put("y", element.y.toDouble())
-            t.put("text", element.text)
-            t.put("color", element.colorValue.toString())
-            t.put("size", element.fontSizeSp.toDouble())
-            t.put("bold", element.bold)
-            t.put("italic", element.italic)
-            t.put("font", element.fontFamilyName)
-            textsJson.put(t)
-        }
-        json.put("texts", textsJson)
-
-        noteFile(context, meta.id).writeText(json.toString())
+    fun saveNote(context: Context, doc: NoteDocument) {
+        noteFile(context, doc.id).writeText(NoteJson.toJson(doc).toString())
     }
 
     fun deleteNote(context: Context, id: String) {
+        // Clean up the imported PDF copy too, if this note had one.
+        loadNote(context, id)?.pdf?.let { pdf ->
+            val file = pdfFile(context, pdf.fileName)
+            if (file.exists()) file.delete()
+        }
         val file = noteFile(context, id)
         if (file.exists()) file.delete()
+    }
+
+    /**
+     * Copy an imported PDF into private storage and create a note that can
+     * annotate it: one page per PDF page, each with an empty annotation
+     * layer. Returns the new document, or null when the file is not a
+     * readable PDF.
+     */
+    fun importPdf(context: Context, input: InputStream, displayName: String): NoteDocument? {
+        val fileName = System.currentTimeMillis().toString() + ".pdf"
+        val target = pdfFile(context, fileName)
+        try {
+            input.use { stream ->
+                target.outputStream().use { out -> stream.copyTo(out) }
+            }
+            val pageCount = ParcelFileDescriptor.open(
+                target, ParcelFileDescriptor.MODE_READ_ONLY
+            ).use { descriptor ->
+                PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
+            }
+            if (pageCount <= 0) {
+                target.delete()
+                return null
+            }
+            val now = System.currentTimeMillis()
+            val pages = (0 until pageCount).map { index ->
+                Page(
+                    id = "p" + System.nanoTime().toString() + index,
+                    pdfPageIndex = index,
+                    layers = listOf(Layer.create("Annotations"))
+                )
+            }
+            val doc = NoteDocument(
+                id = newId(),
+                title = displayName.removeSuffix(".pdf").removeSuffix(".PDF"),
+                createdAt = now,
+                updatedAt = now,
+                pdf = PdfAttachment(fileName = fileName, pageCount = pageCount),
+                pages = pages
+            )
+            saveNote(context, doc)
+            return doc
+        } catch (e: Exception) {
+            if (target.exists()) target.delete()
+            return null
+        }
     }
 }
