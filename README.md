@@ -8,13 +8,21 @@ notebook list, and build installable APKs in the cloud with GitHub Actions.
 > handwriting apps (like StarNote): a drawing canvas, pen tools, and a
 > notebook library. It does not use any other app's code or assets.
 
-## Features (v0.1)
+## Features
 
+**v0.2**
+- Type on the page: Text tool — tap to add text, tap to edit, drag to move,
+  adjustable text size and color
+- Page templates when creating a note: blank page or lined page
+  (horizontal rules + margin line)
+- Bigger palettes: 12 pen colors and 8 highlighter colors
+
+**v0.1**
 - Notebook list: create, open, rename (title is edited in the editor), delete
 - Handwriting canvas with smooth strokes
 - Tools: pen, highlighter (translucent), eraser (removes strokes it touches)
-- 5 ink colors and adjustable stroke thickness
-- Undo / redo / clear page
+- Adjustable stroke thickness
+- Undo / redo / clear ink
 - Notes are saved on-device as JSON files (no account, works offline)
 
 ## Build the APK without a PC
