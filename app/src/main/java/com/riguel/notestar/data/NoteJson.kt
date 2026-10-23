@@ -77,6 +77,7 @@ object NoteJson {
         json.put("color", stroke.colorValue.toString())
         json.put("thickness", stroke.thickness.toDouble())
         json.put("highlighter", stroke.highlighter)
+        json.put("pen", stroke.penType)
         val points = JSONArray()
         for (point in stroke.points) {
             val p = JSONArray()
@@ -193,7 +194,8 @@ object NoteJson {
                     points = points,
                     colorValue = s.getString("color").toULong(),
                     thickness = s.getDouble("thickness").toFloat(),
-                    highlighter = s.optBoolean("highlighter", false)
+                    highlighter = s.optBoolean("highlighter", false),
+                    penType = s.optString("pen", PenTypes.PEN)
                 )
             )
         }
