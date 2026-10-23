@@ -10,16 +10,22 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.riguel.notestar.data.NoteMeta
+import com.riguel.notestar.data.PageTemplate
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,11 +33,12 @@ import java.util.Locale
 @Composable
 fun HomeScreen(
     notes: List<NoteMeta>,
-    onCreate: () -> Unit,
+    onCreate: (PageTemplate) -> Unit,
     onOpen: (String) -> Unit,
     onDelete: (String) -> Unit
 ) {
     val dateFormat = SimpleDateFormat("MMM d, yyyy h:mm a", Locale.getDefault())
+    var showTemplatePicker by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -40,12 +47,12 @@ fun HomeScreen(
     ) {
         Text(text = "NoteStar", style = MaterialTheme.typography.headlineLarge)
         Text(
-            text = "Handwritten notes, saved on this device",
+            text = "Handwritten and typed notes, saved on this device",
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(16.dp))
         Button(
-            onClick = onCreate,
+            onClick = { showTemplatePicker = true },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("New note")
@@ -75,7 +82,8 @@ fun HomeScreen(
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Text(
-                                    text = dateFormat.format(Date(note.updatedAt)),
+                                    text = (if (note.template == PageTemplate.LINED) "Lined page" else "Blank page") +
+                                        " · " + dateFormat.format(Date(note.updatedAt)),
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
@@ -87,5 +95,38 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    if (showTemplatePicker) {
+        AlertDialog(
+            onDismissRequest = { showTemplatePicker = false },
+            title = { Text("Choose a page style") },
+            text = {
+                Column {
+                    TextButton(
+                        onClick = {
+                            showTemplatePicker = false
+                            onCreate(PageTemplate.BLANK)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Blank page — clean white page")
+                    }
+                    TextButton(
+                        onClick = {
+                            showTemplatePicker = false
+                            onCreate(PageTemplate.LINED)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Lined page — horizontal lines with a margin")
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showTemplatePicker = false }) { Text("Cancel") }
+            }
+        )
     }
 }
