@@ -60,7 +60,7 @@ import com.riguel.notestar.data.PageTemplate
 private enum class CreateKind { COVER, PAPER }
 
 private val PAPER_CATEGORIES: List<Pair<String, List<PageTemplate>>> = listOf(
-    "Base" to listOf(PageTemplate.BLANK, PageTemplate.LINED, PageTemplate.DOTTED),
+    "Base" to PaperTemplates.baseCategory,
     "Study" to listOf(PageTemplate.LECTURE, PageTemplate.LINED, PageTemplate.BLANK),
     "Plan" to listOf(PageTemplate.PLANNER, PageTemplate.DOTTED, PageTemplate.LINED),
     "Work" to listOf(PageTemplate.LINED, PageTemplate.LECTURE, PageTemplate.BLANK),
@@ -73,13 +73,8 @@ private val COVER_CATEGORIES = listOf(
     "Simple", "Graph", "Fruit", "Illustration", "Black and white", "Yearly"
 )
 
-fun templateLabel(template: PageTemplate): String = when (template) {
-    PageTemplate.BLANK -> "Blank page"
-    PageTemplate.LINED -> "Lined page"
-    PageTemplate.DOTTED -> "Mind map (dot grid)"
-    PageTemplate.PLANNER -> "Planner"
-    PageTemplate.LECTURE -> "Lecture notes"
-}
+fun templateLabel(template: PageTemplate): String =
+    PaperTemplates.def(template).label
 
 /** Mini paper preview drawn to match each template's look. */
 @Composable
@@ -95,31 +90,17 @@ fun PaperThumbnail(template: PageTemplate, modifier: Modifier = Modifier) {
             val line = Color(0xFFB9CDD6)
             val faint = Color(0xFFD8E2E8)
             when (template) {
-                PageTemplate.BLANK -> Unit
-                PageTemplate.LINED -> {
-                    var y = 14.dp.toPx()
-                    while (y < size.height - 4.dp.toPx()) {
-                        drawLine(line, Offset(6.dp.toPx(), y), Offset(size.width - 6.dp.toPx(), y), 1f)
-                        y += 10.dp.toPx()
-                    }
-                    drawLine(
-                        Color(0xFFE5A3A3),
-                        Offset(12.dp.toPx(), 4.dp.toPx()),
-                        Offset(12.dp.toPx(), size.height - 4.dp.toPx()),
-                        1f
-                    )
-                }
-                PageTemplate.DOTTED -> {
-                    var yy = 10.dp.toPx()
-                    while (yy < size.height - 4.dp.toPx()) {
-                        var xx = 8.dp.toPx()
-                        while (xx < size.width - 4.dp.toPx()) {
-                            drawCircle(line, 1.4.dp.toPx(), Offset(xx, yy))
-                            xx += 9.dp.toPx()
-                        }
-                        yy += 10.dp.toPx()
-                    }
-                }
+                // Pattern templates render their real pattern, scaled to
+                // the thumbnail (an A4-width page fitted to the card width).
+                PageTemplate.BLANK, PageTemplate.LINED, PageTemplate.DOTTED,
+                PageTemplate.THIN_LINE, PageTemplate.BOLD_LINE,
+                PageTemplate.MINI_CHECK, PageTemplate.MID_CHECK,
+                PageTemplate.DOT_GRID -> drawPaperPattern(
+                    template,
+                    scale = size.width / PaperTemplates.A4_WIDTH_UNITS,
+                    offset = Offset.Zero,
+                    size = size
+                )
                 PageTemplate.PLANNER -> {
                     drawRect(faint, Offset(6.dp.toPx(), 6.dp.toPx()),
                         androidx.compose.ui.geometry.Size(size.width - 12.dp.toPx(), 12.dp.toPx()))
