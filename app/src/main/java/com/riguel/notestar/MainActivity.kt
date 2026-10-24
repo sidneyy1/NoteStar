@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -40,6 +38,8 @@ import com.riguel.notestar.data.ExportException
 import com.riguel.notestar.data.ExportOptions
 import com.riguel.notestar.data.PdfExportService
 import com.riguel.notestar.data.NoteDocument
+import com.riguel.notestar.data.NoteJson
+import com.riguel.notestar.data.NotificationCenter
 import com.riguel.notestar.data.NoteStorage
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PageTemplate
@@ -120,8 +120,13 @@ fun NoteStarApp(
     onEnterPip: () -> Unit
 ) {
     val context = LocalContext.current
-    val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    // Immediate messages only: save/export failures and export-save
+    // confirmations. They are dialogs, so they appear wherever the user
+    // is. Quiet save confirmations never live here; they go through
+    // NotificationCenter and are shown only by the All notes screen.
+    var immediateError by remember { mutableStateOf<String?>(null) }
+    var exportSavedName by remember { mutableStateOf<String?>(null) }
 
     // Open documents live in browser-style tabs above the editors.
     var openTabs by remember { mutableStateOf<List<NoteDocument>>(emptyList()) }
@@ -133,10 +138,6 @@ fun NoteStarApp(
 
     val activeDoc = openTabs.firstOrNull { it.id == activeTabId }
     val docTabs = openTabs.map { DocTab(it.id, it.title, it.pdf != null) }
-
-    fun notify(message: String) {
-        scope.launch { snackbarHostState.showSnackbar(message) }
-    }
 
     // ---- Export as PDF ----
     var exportDoc by remember { mutableStateOf<NoteDocument?>(null) }
@@ -213,7 +214,7 @@ fun NoteStarApp(
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         runCatching { context.startActivity(intent) }
-            .onFailure { notify("No PDF viewer app found") }
+            .onFailure { immediateError = "No PDF viewer app found" }
     }
 
     val exportSaveLauncher = rememberLauncherForActivityResult(
@@ -228,7 +229,7 @@ fun NoteStarApp(
                     }
                 }
             }
-            notify("Saved ${file.name}")
+            exportSavedName = file.name
         }
     }
 
@@ -254,10 +255,42 @@ fun NoteStarApp(
         }
     }
 
-    fun saveDoc(updated: NoteDocument, message: String) {
-        NoteStorage.saveNote(context, updated)
+    /**
+     * Silent save (v0.13). Every editor save — back, tab switch,
+     * dispose, toolbar Save — goes through here and shows NOTHING in
+     * the editor. If the stored content actually changed (title, tags,
+     * page size, cover, pages; updatedAt alone does not count), one
+     * event is queued for the All notes screen; if nothing changed,
+     * nothing is queued, so opening/closing an untouched note 10 times
+     * produces no alert. A real write failure shows immediately, wherever
+     * the user is, via [immediateError].
+     */
+    fun saveDoc(updated: NoteDocument) {
+        val prev = try {
+            NoteStorage.loadNote(context, updated.id)
+        } catch (e: Exception) {
+            null
+        }
+        val changed = prev == null ||
+            prev.title != updated.title ||
+            prev.tags != updated.tags ||
+            prev.pageFormat != updated.pageFormat ||
+            prev.coverColorValue != updated.coverColorValue ||
+            prev.pdf?.fileName != updated.pdf?.fileName ||
+            NoteJson.toJson(prev).optJSONArray("pages").toString() !=
+                NoteJson.toJson(updated).optJSONArray("pages").toString()
+        try {
+            NoteStorage.saveNote(context, updated)
+        } catch (e: Exception) {
+            immediateError = "Save failed"
+            return
+        }
         openTabs = openTabs.map { if (it.id == updated.id) updated else it }
-        notify(message)
+        if (changed) {
+            NotificationCenter.queueSave(
+                updated.id, updated.pdf != null, System.currentTimeMillis()
+            )
+        }
         refresh++
     }
 
@@ -268,9 +301,12 @@ fun NoteStarApp(
     ) { granted ->
         if (granted) {
             val count = BackupManager.backupAll(context)
-            notify("Backed up $count note(s) to Documents/NoteStar")
+            NotificationCenter.queueInfo(
+                "Backed up $count note(s) to Documents/NoteStar",
+                System.currentTimeMillis()
+            )
         } else {
-            notify("Storage permission is needed to save backups")
+            immediateError = "Storage permission is needed to save backups"
         }
     }
     LaunchedEffect(Unit) {
@@ -286,7 +322,7 @@ fun NoteStarApp(
         }
     }
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { scaffoldPadding ->
+    Scaffold { scaffoldPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -327,7 +363,7 @@ fun NoteStarApp(
                                     showHome = true
                                     refresh++
                                 },
-                                onSave = { updated -> saveDoc(updated, "Annotations saved") },
+                                onSave = { updated -> saveDoc(updated) },
                                 onExportRequest = { page ->
                                     NoteStorage.loadNote(context, activeDoc.id)?.let {
                                         startExport(it, page)
@@ -345,7 +381,7 @@ fun NoteStarApp(
                                     showHome = true
                                     refresh++
                                 },
-                                onSave = { updated -> saveDoc(updated, "Note saved") },
+                                onSave = { updated -> saveDoc(updated) },
                                 onExportRequest = { page ->
                                     NoteStorage.loadNote(context, activeDoc.id)?.let {
                                         startExport(it, page)
@@ -366,7 +402,10 @@ fun NoteStarApp(
                                         pageFormat = activeDoc.pageFormat
                                     )
                                     NoteStorage.saveNote(context, excerpt)
-                                    notify("Page saved as a new note: $excerptTitle")
+                                    NotificationCenter.queueInfo(
+                                        "Page saved as a new note: $excerptTitle",
+                                        System.currentTimeMillis()
+                                    )
                                     refresh++
                                 },
                                 onEnterPip = onEnterPip,
@@ -429,10 +468,13 @@ fun NoteStarApp(
                         onImportPdf = { input, displayName ->
                             val imported = NoteStorage.importPdf(context, input, displayName)
                             if (imported != null) {
-                                notify("Imported \"${imported.title}\" — tap it to annotate")
+                                NotificationCenter.queueInfo(
+                                    "Imported \"${imported.title}\" — tap it to annotate",
+                                    System.currentTimeMillis()
+                                )
                                 refresh++
                             } else {
-                                notify("That file could not be read as a PDF")
+                                immediateError = "That file could not be read as a PDF"
                             }
                         },
                         onBackupNow = {
@@ -442,15 +484,24 @@ fun NoteStarApp(
                                 )
                             } else {
                                 val count = BackupManager.backupAll(context)
-                                notify("Backed up $count note(s) to Documents/NoteStar")
+                                NotificationCenter.queueInfo(
+                                    "Backed up $count note(s) to Documents/NoteStar",
+                                    System.currentTimeMillis()
+                                )
                             }
                         },
                         onRestoreBackup = {
                             val count = BackupManager.restoreAll(context)
                             if (count > 0) {
-                                notify("Restored $count note(s) from the backup")
+                                NotificationCenter.queueInfo(
+                                    "Restored $count note(s) from the backup",
+                                    System.currentTimeMillis()
+                                )
                             } else {
-                                notify("No new notes found in the backup")
+                                NotificationCenter.queueInfo(
+                                    "No new notes found in the backup",
+                                    System.currentTimeMillis()
+                                )
                             }
                             refresh++
                         }
@@ -493,6 +544,26 @@ fun NoteStarApp(
                 text = { Text(message) },
                 confirmButton = {
                     TextButton(onClick = { exportError = null }) { Text("OK") }
+                }
+            )
+        }
+        immediateError?.let { message ->
+            AlertDialog(
+                onDismissRequest = { immediateError = null },
+                title = { Text("NoteStar") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { immediateError = null }) { Text("OK") }
+                }
+            )
+        }
+        exportSavedName?.let { name ->
+            AlertDialog(
+                onDismissRequest = { exportSavedName = null },
+                title = { Text("Export saved") },
+                text = { Text("Saved $name") },
+                confirmButton = {
+                    TextButton(onClick = { exportSavedName = null }) { Text("OK") }
                 }
             )
         }
