@@ -8,15 +8,18 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -67,6 +70,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -76,6 +80,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -94,6 +99,7 @@ import com.riguel.notestar.data.Tool
 import com.riguel.notestar.data.Stroke as NoteStroke
 import java.io.File
 import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -193,6 +199,8 @@ fun PdfNoteScreen(
         loadWork()
         selectedTextId = null
         editingTextId = null
+        pdfZoom = 1f
+        pdfPan = Offset.Zero
     }
 
     // --- PDF rendering ---
@@ -239,6 +247,33 @@ fun PdfNoteScreen(
             1f
         }
 
+    // Page view zoom/pan: two-finger pinch zooms the whole PDF page (1 = the
+    // page fitted entirely into the available space), two-finger drag pans.
+    var pdfZoom by remember { mutableStateOf(1f) }
+    var pdfPan by remember { mutableStateOf(Offset.Zero) }
+    val totalScale = scaleFactor * pdfZoom
+    val pageZoomInterceptor = Modifier.pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.size > 1) {
+                    val zoomChange = event.calculateZoom()
+                    val panChange = event.calculatePan()
+                    val centroid = event.calculateCentroid(useTouchSlop = false)
+                    val newZoom = (pdfZoom * zoomChange).coerceIn(1f, 5f)
+                    val factor = if (pdfZoom == 0f) 1f else newZoom / pdfZoom
+                    pdfPan = Offset(
+                        centroid.x - (centroid.x - pdfPan.x) * factor + panChange.x,
+                        centroid.y - (centroid.y - pdfPan.y) * factor + panChange.y
+                    )
+                    pdfZoom = newZoom
+                    if (pdfZoom == 1f) pdfPan = Offset.Zero
+                    event.changes.forEach { it.consume() }
+                }
+            }
+        }
+    }
+
     fun updateText(updated: TextElement) {
         val i = texts.indexOfFirst { it.id == updated.id }
         if (i >= 0) texts[i] = updated
@@ -270,7 +305,7 @@ fun PdfNoteScreen(
         strokes.removeAll { stroke ->
             stroke.points.any { p ->
                 hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) <
-                    20.0 / scaleFactor
+                    20.0 / totalScale
             }
         }
     }
@@ -354,6 +389,12 @@ fun PdfNoteScreen(
             Text("PDF page ${currentPdfPage + 1} / $totalPages")
             IconButton(onClick = { switchPdfPage(currentPdfPage + 1) }) {
                 Icon(Icons.Filled.KeyboardArrowRight, contentDescription = "Next PDF page")
+            }
+            if (pdfZoom != 1f) {
+                TextButton(onClick = {
+                    pdfZoom = 1f
+                    pdfPan = Offset.Zero
+                }) { Text("Reset zoom") }
             }
             Spacer(modifier = Modifier.weight(1f))
             Text(
@@ -512,13 +553,15 @@ fun PdfNoteScreen(
             }
         }
 
-        // Page surface
-        Box(
+        // Page surface: the whole page is fitted into the available space
+        // (never taller/wider than it), and two-finger pinch zooms/pans it.
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(Color(0xFFEEEEEE)),
-            contentAlignment = Alignment.TopCenter
+                .background(Color(0xFFEEEEEE))
+                .clipToBounds(),
+            contentAlignment = Alignment.Center
         ) {
             val bitmap = pageBitmap
             if (bitmap == null || pageWidthPt == 0) {
@@ -527,11 +570,20 @@ fun PdfNoteScreen(
                     modifier = Modifier.padding(24.dp)
                 )
             } else {
+                val fitScale = min(
+                    maxWidth.value / pageWidthPt.toFloat(),
+                    maxHeight.value / pageHeightPt.toFloat()
+                )
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(pageWidthPt.toFloat() / pageHeightPt.toFloat())
+                        .size(
+                            width = (pageWidthPt * fitScale).dp,
+                            height = (pageHeightPt * fitScale).dp
+                        )
                         .background(Color.White)
+                        .then(
+                            if (tool != Tool.TEXT) pageZoomInterceptor else Modifier
+                        )
                 ) {
                     Image(
                         bitmap = bitmap,
@@ -541,8 +593,8 @@ fun PdfNoteScreen(
                     )
 
                     fun toPdf(screen: Offset, pressure: Float = 1f): StrokePoint = StrokePoint(
-                        x = screen.x / scaleFactor,
-                        y = screen.y / scaleFactor,
+                        x = (screen.x - pdfPan.x) / totalScale,
+                        y = (screen.y - pdfPan.y) / totalScale,
                         pressure = pressure
                     )
 
@@ -651,7 +703,8 @@ fun PdfNoteScreen(
                             .then(gestureModifier)
                     ) {
                         withTransform({
-                            scale(scaleFactor, scaleFactor, Offset.Zero)
+                            translate(pdfPan.x, pdfPan.y)
+                            scale(totalScale, totalScale, Offset.Zero)
                         }) {
                             for (stroke in strokes) {
                                 drawStrokeSmooth(stroke)
@@ -677,13 +730,13 @@ fun PdfNoteScreen(
                             val isSelected = element.id == selectedTextId
                             val position = Modifier.offset {
                                 IntOffset(
-                                    (element.x * scaleFactor).roundToInt(),
-                                    (element.y * scaleFactor).roundToInt()
+                                    (pdfPan.x + element.x * totalScale).roundToInt(),
+                                    (pdfPan.y + element.y * totalScale).roundToInt()
                                 )
                             }
                             // TextElement stores size in PDF points here.
                             val displayElement = element.copy(
-                                fontSizeSp = element.fontSizeSp * scaleFactor
+                                fontSizeSp = element.fontSizeSp * totalScale
                             )
                             if (isEditing) {
                                 BasicTextField(
@@ -720,7 +773,7 @@ fun PdfNoteScreen(
                                                         },
                                                         RoundedCornerShape(4.dp)
                                                     )
-                                                    .pointerInput(element.id, scaleFactor) {
+                                                    .pointerInput(element.id, totalScale) {
                                                         // pan/zoom are per-event changes;
                                                         // apply them to the freshest state.
                                                         detectTransformGestures { _, pan, zoom, _ ->
@@ -729,8 +782,8 @@ fun PdfNoteScreen(
                                                             } ?: element
                                                             updateText(
                                                                 base.copy(
-                                                                    x = base.x + pan.x / scaleFactor,
-                                                                    y = base.y + pan.y / scaleFactor,
+                                                                    x = base.x + pan.x / totalScale,
+                                                                    y = base.y + pan.y / totalScale,
                                                                     fontSizeSp = (base.fontSizeSp * zoom)
                                                                         .coerceIn(6f, 90f)
                                                                 )
