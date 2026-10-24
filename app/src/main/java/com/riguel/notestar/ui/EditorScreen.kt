@@ -32,7 +32,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredSize
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -147,7 +148,7 @@ import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PageFormat
 import com.riguel.notestar.data.PageTemplate
-import com.riguel.notestar.data.PageTransform
+import com.riguel.notestar.data.PageViewState
 import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
@@ -254,6 +255,65 @@ fun textStyleForPage(
     )
 }
 
+/**
+ * Draw one text box on the page Canvas, inside the caller's
+ * withTransform + page clip (v0.14.1). This is the ONLY display path
+ * for non-editing text: the old separate Text-composable overlay is
+ * gone, so text cannot diverge from ink — both go through the same
+ * matrix M (translate + uniform scale, pivot at the page origin) and
+ * the same page-rectangle clip. The Paint's textSize is in PAGE
+ * units (points); the canvas matrix scales it to fontSize x zoom on
+ * screen, so text stays the same size relative to the page at every
+ * zoom and stays crisp (vector glyphs, never a bitmap). Multi-line
+ * text is wrapped at the stored width with this font's real Paint
+ * widths, exactly as the exporter wraps it; the first baseline is
+ * boxTop + padding + real ascent, and each line steps by the real
+ * line height. Emoji renders through the system font fallback chain
+ * (Noto Color Emoji) on the same matrix — it is not a separate view
+ * and scales with the text around it. A word longer than the box is
+ * broken by TextGeometry.wrapLines, which never splits a surrogate
+ * pair, so an emoji is never torn in half.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPageText(
+    element: TextElement,
+    pageWidthPt: Float
+) {
+    if (element.text.isEmpty()) return
+    val family = when (element.fontFamilyName) {
+        TextFonts.SERIF -> "serif"
+        TextFonts.MONO -> "monospace"
+        TextFonts.CURSIVE -> "cursive"
+        else -> "sans-serif"
+    }
+    val style = when {
+        element.bold && element.italic -> Typeface.BOLD_ITALIC
+        element.bold -> Typeface.BOLD
+        element.italic -> Typeface.ITALIC
+        else -> Typeface.NORMAL
+    }
+    val paint = Paint().apply {
+        color = element.colorValue.toInt()
+        textSize = element.fontSizeSp
+        typeface = Typeface.create(family, style)
+        isAntiAlias = true
+        isUnderlineText = element.underline
+        textAlign = Paint.Align.LEFT
+    }
+    val wrapWidth = TextGeometry.wrapWidthPt(element, pageWidthPt)
+    val lines = TextGeometry.wrapLines(
+        element.text, wrapWidth, element.fontSizeSp
+    ) { text, _ -> paint.measureText(text) }
+    val ascent = TextMetrics.ascentPt(element)
+    val lineHeight = TextMetrics.lineHeightPt(element)
+    val native = drawContext.canvas.nativeCanvas
+    val left = element.x + element.paddingPt
+    for (i in lines.indices) {
+        val baseline = element.y + element.paddingPt + ascent +
+            i * lineHeight
+        native.drawText(lines[i], left, baseline, paint)
+    }
+}
+
 private fun colorToHex(c: Color): String = String.format(
     "#%02X%02X%02X",
     (c.red * 255).roundToInt(),
@@ -357,12 +417,13 @@ fun EditorScreen(
     var textResizeTotalDxPx by remember { mutableStateOf(0f) }
     var textResizeLeftCorner by remember { mutableStateOf(false) }
     var selectedStroke by remember { mutableStateOf<Pair<String, Int>?>(null) }
-    var viewScale by remember { mutableStateOf(1f) }
-    var viewOffset by remember { mutableStateOf(Offset.Zero) }
+    // The single view transform (v0.14.1): every layer below reads
+    // scale and offset from this one object, never from a local copy.
+    val pageViewState = remember { PageViewState() }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current.density
     // sp -> pixels multiplier (density x fontScale). The page-text style
-    // divides by this, so a stored point size lands at size*viewScale px.
+    // divides by this, so a stored point size lands at size*pageViewState.scale px.
     val scaledDensity = LocalDensity.current.density * LocalDensity.current.fontScale
     var pageFormat by remember { mutableStateOf(initialDoc.pageFormat) }
     var viewReady by remember { mutableStateOf(false) }
@@ -422,8 +483,8 @@ fun EditorScreen(
 
     fun resetViewToFit() {
         if (canvasSize.width > 0) {
-            viewScale = fitScaleNow
-            viewOffset = fitOffset(fitScaleNow)
+            pageViewState.scale = fitScaleNow
+            pageViewState.offset = fitOffset(fitScaleNow)
         }
     }
 
@@ -479,7 +540,7 @@ fun EditorScreen(
     }
 
     // Brief zoom-percentage badge while the zoom changes.
-    LaunchedEffect(viewScale) {
+    LaunchedEffect(pageViewState.scale) {
         if (viewReady) {
             showZoomBadge = true
             delay(1200)
@@ -670,7 +731,7 @@ fun EditorScreen(
                 hypot(
                     (p.x - point.x).toDouble(),
                     (p.y - point.y).toDouble()
-                ) < 24.0 / viewScale
+                ) < 24.0 / pageViewState.scale
             }
         }
     }
@@ -897,7 +958,7 @@ fun EditorScreen(
                             val pan = centroid - prevCentroid
                             // Rubber-band past the limits; the release
                             // handler snaps the zoom back into range.
-                            val raw = viewScale * zoom
+                            val raw = pageViewState.scale * zoom
                             val clamped = raw.coerceIn(
                                 fitScaleNow, fitScaleNow * 4f
                             )
@@ -908,19 +969,19 @@ fun EditorScreen(
                                     clamped - (clamped - raw) * 0.35f
                                 else -> raw
                             }
-                            val factor = banded / viewScale
-                            viewOffset = clampPinchOffset(
+                            val factor = banded / pageViewState.scale
+                            pageViewState.offset = clampPinchOffset(
                                 Offset(
                                     x = centroid.x -
-                                        (centroid.x - viewOffset.x) * factor +
+                                        (centroid.x - pageViewState.offset.x) * factor +
                                         pan.x,
                                     y = centroid.y -
-                                        (centroid.y - viewOffset.y) * factor +
+                                        (centroid.y - pageViewState.offset.y) * factor +
                                         pan.y
                                 ),
                                 banded
                             )
-                            viewScale = banded
+                            pageViewState.scale = banded
                             val nowMs = touches.first().uptimeMillis
                             val dt = (nowMs - lastEventMs).toFloat()
                             if (dt > 0f) {
@@ -940,21 +1001,21 @@ fun EditorScreen(
                         pinching = false
                         // Snap a rubber-banded zoom back into range,
                         // anchored at the last pinch center.
-                        val target = viewScale.coerceIn(
+                        val target = pageViewState.scale.coerceIn(
                             fitScaleNow, fitScaleNow * 4f
                         )
-                        if (target != viewScale) {
-                            val f = target / viewScale
-                            viewOffset = clampPinchOffset(
+                        if (target != pageViewState.scale) {
+                            val f = target / pageViewState.scale
+                            pageViewState.offset = clampPinchOffset(
                                 Offset(
                                     x = prevCentroid.x -
-                                        (prevCentroid.x - viewOffset.x) * f,
+                                        (prevCentroid.x - pageViewState.offset.x) * f,
                                     y = prevCentroid.y -
-                                        (prevCentroid.y - viewOffset.y) * f
+                                        (prevCentroid.y - pageViewState.offset.y) * f
                                 ),
                                 target
                             )
-                            viewScale = target
+                            pageViewState.scale = target
                         }
                         // Fling: keep the two-finger pan gliding with a
                         // natural exponential decay, clamped to the page.
@@ -969,13 +1030,13 @@ fun EditorScreen(
                                         val dt = (frame - last) / 1000f
                                         if (dt > 0f) {
                                             val proposed = Offset(
-                                                viewOffset.x + v.x * dt,
-                                                viewOffset.y + v.y * dt
+                                                pageViewState.offset.x + v.x * dt,
+                                                pageViewState.offset.y + v.y * dt
                                             )
                                             val clampedNow = clampPinchOffset(
-                                                proposed, viewScale
+                                                proposed, pageViewState.scale
                                             )
-                                            viewOffset = clampedNow
+                                            pageViewState.offset = clampedNow
                                             if (clampedNow != proposed) break
                                             v *= kotlin.math.exp(-3.2f * dt)
                                         }
@@ -1006,8 +1067,11 @@ fun EditorScreen(
                 .clipToBounds()
                 .then(multiTouchPageGestures)
         ) {
+            // Placement and hit-testing go through the same M: a tap
+            // stores screenToPage(tap) with the full transform, pan
+            // included — never tapPoint / zoom.
             fun toPage(screen: Offset, pressure: Float = 1f): StrokePoint {
-                val p = PageTransform.toPage(screen, viewScale, viewOffset)
+                val p = pageViewState.toPage(screen)
                 return StrokePoint(x = p.x, y = p.y, pressure = pressure)
             }
 
@@ -1017,14 +1081,19 @@ fun EditorScreen(
             // — text is locked unless selected with the Select tool,
             // so tapping it in Draw must not start editing it, and
             // must not stack a new empty box on top of it.
-            fun textAtPagePoint(p: StrokePoint): TextElement? {
+            // Topmost visible text box containing a page point, with
+            // its layer id (text is drawn over ink, so text wins a
+            // tap that lands on both). Used by the SELECT tap handler
+            // and the Draw/Text tap handler; both work in page coords
+            // via toPage (full M, including pan), never in screen px.
+            fun textAtPagePoint(p: StrokePoint): Pair<String, TextElement>? {
                 for (layer in layersWork.asReversed()) {
                     if (!layer.visible) continue
                     for (el in layer.texts.asReversed()) {
                         val w = TextGeometry.wrapWidthPt(el, pageFormat.widthPt)
                         val h = TextMetrics.boxHeightPt(el, pageFormat.widthPt)
                         if (p.x in el.x..(el.x + w) && p.y in el.y..(el.y + h)) {
-                            return el
+                            return layer.id to el
                         }
                     }
                 }
@@ -1037,35 +1106,35 @@ fun EditorScreen(
                         detectTransformGestures { centroid, pan, zoom, _ ->
                             // Zoom clamps to [fit, 400% of fit]; pan keeps
                             // at least 48dp of the page on screen.
-                            val newScale = (viewScale * zoom)
+                            val newScale = (pageViewState.scale * zoom)
                                 .coerceIn(fitScaleNow, fitScaleNow * 4f)
-                            val factor = newScale / viewScale
-                            viewOffset = clampViewOffset(
+                            val factor = newScale / pageViewState.scale
+                            pageViewState.offset = clampViewOffset(
                                 Offset(
-                                    x = centroid.x - (centroid.x - viewOffset.x) * factor + pan.x,
-                                    y = centroid.y - (centroid.y - viewOffset.y) * factor + pan.y
+                                    x = centroid.x - (centroid.x - pageViewState.offset.x) * factor + pan.x,
+                                    y = centroid.y - (centroid.y - pageViewState.offset.y) * factor + pan.y
                                 ),
                                 newScale
                             )
-                            viewScale = newScale
+                            pageViewState.scale = newScale
                         }
                     }
                     .pointerInput(mode, fitScaleNow) {
                         detectTapGestures(
                             onDoubleTap = { pos ->
-                                if (viewScale > fitScaleNow * 1.05f) {
+                                if (pageViewState.scale > fitScaleNow * 1.05f) {
                                     resetViewToFit()
                                 } else {
                                     val target = fitScaleNow * 2f
-                                    val f = target / viewScale
-                                    viewOffset = clampViewOffset(
+                                    val f = target / pageViewState.scale
+                                    pageViewState.offset = clampViewOffset(
                                         Offset(
-                                            pos.x - (pos.x - viewOffset.x) * f,
-                                            pos.y - (pos.y - viewOffset.y) * f
+                                            pos.x - (pos.x - pageViewState.offset.x) * f,
+                                            pos.y - (pos.y - pageViewState.offset.y) * f
                                         ),
                                         target
                                     )
-                                    viewScale = target
+                                    pageViewState.scale = target
                                 }
                             }
                         )
@@ -1076,6 +1145,25 @@ fun EditorScreen(
                             detectTapGestures { screen ->
                                 if (suppressDrawing) return@detectTapGestures
                                 val pagePoint = toPage(screen)
+                                // Text is drawn on the Canvas, so it is
+                                // hit-tested here too, in page coords:
+                                // a tap on canvas text selects it (text
+                                // is drawn over ink, so it wins over a
+                                // stroke underneath). Locked-layer text
+                                // is not selectable and falls through
+                                // to the stroke search below.
+                                val textHit = textAtPagePoint(pagePoint)
+                                if (textHit != null) {
+                                    val hitLayer = layersWork.firstOrNull {
+                                        it.id == textHit.first
+                                    }
+                                    if (hitLayer != null && !hitLayer.locked) {
+                                        selectedTextId = textHit.second.id
+                                        activeLayerId = textHit.first
+                                        selectedStroke = null
+                                        return@detectTapGestures
+                                    }
+                                }
                                 var found: Pair<String, Int>? = null
                                 for (layer in layersWork.asReversed()) {
                                     if (!layer.visible) continue
@@ -1085,7 +1173,7 @@ fun EditorScreen(
                                             hypot(
                                                 (p.x - pagePoint.x).toDouble(),
                                                 (p.y - pagePoint.y).toDouble()
-                                            ) < 28.0 / viewScale
+                                            ) < 28.0 / pageViewState.scale
                                         }
                                         if (hit) {
                                             found = layer.id to i
@@ -1133,8 +1221,8 @@ fun EditorScreen(
                                         val idx = sel.second
                                         if (layer != null && idx in layer.strokes.indices) {
                                             val s = layer.strokes[idx]
-                                            val dx = dragAmount.x / viewScale
-                                            val dy = dragAmount.y / viewScale
+                                            val dx = dragAmount.x / pageViewState.scale
+                                            val dy = dragAmount.y / pageViewState.scale
                                             layer.strokes[idx] = s.copy(
                                                 points = s.points.map { p ->
                                                     p.copy(x = p.x + dx, y = p.y + dy)
@@ -1297,37 +1385,37 @@ fun EditorScreen(
                 // The bounded page sheet: soft shadow + white paper. The
                 // template pattern is clipped to the page rectangle.
                 val sheetSize = androidx.compose.ui.geometry.Size(
-                    pageFormat.widthPt * viewScale,
-                    pageFormat.heightPt * viewScale
+                    pageFormat.widthPt * pageViewState.scale,
+                    pageFormat.heightPt * pageViewState.scale
                 )
                 drawRoundRect(
                     color = Color(0x22000000),
-                    topLeft = Offset(viewOffset.x, viewOffset.y + 6f),
+                    topLeft = Offset(pageViewState.offset.x, pageViewState.offset.y + 6f),
                     size = sheetSize,
                     cornerRadius = CornerRadius(6f, 6f)
                 )
                 drawRect(
                     color = Color.White,
-                    topLeft = viewOffset,
+                    topLeft = pageViewState.offset,
                     size = sheetSize
                 )
                 // The part of the page currently on screen, in page
                 // coordinates: the pattern generator draws only inside it.
                 val visiblePageRect = androidx.compose.ui.geometry.Rect(
-                    left = maxOf(0f, -viewOffset.x / viewScale),
-                    top = maxOf(0f, -viewOffset.y / viewScale),
+                    left = maxOf(0f, -pageViewState.offset.x / pageViewState.scale),
+                    top = maxOf(0f, -pageViewState.offset.y / pageViewState.scale),
                     right = minOf(
                         pageFormat.widthPt,
-                        (size.width - viewOffset.x) / viewScale
+                        (size.width - pageViewState.offset.x) / pageViewState.scale
                     ),
                     bottom = minOf(
                         pageFormat.heightPt,
-                        (size.height - viewOffset.y) / viewScale
+                        (size.height - pageViewState.offset.y) / pageViewState.scale
                     )
                 )
                 withTransform({
-                    translate(viewOffset.x, viewOffset.y)
-                    scale(viewScale, viewScale, Offset.Zero)
+                    translate(pageViewState.offset.x, pageViewState.offset.y)
+                    scale(pageViewState.scale, pageViewState.scale, Offset.Zero)
                 }) {
                     // Clip ink to the page through the raw canvas
                     // (DrawScope.clipRect is unavailable in this Compose
@@ -1368,6 +1456,22 @@ fun EditorScreen(
                             )
                         )
                     }
+                    // Text, on this same canvas, inside the same
+                    // transform and page clip as template and ink
+                    // (v0.14.1): screen = M(page) for every glyph, so
+                    // text can never sit anywhere but on the page, at
+                    // its stored page position, over its highlight.
+                    // The box being edited is skipped here — it is
+                    // drawn once, by its BasicTextField below, so it
+                    // is never double-drawn with two renderers.
+                    for (layer in layersWork) {
+                        if (!layer.visible) continue
+                        for (element in layer.texts) {
+                            if (element.id != editingTextId) {
+                                drawPageText(element, pageFormat.widthPt)
+                            }
+                        }
+                    }
                     // Selection box around the selected stroke (Select mode)
                     if (mode == EditorMode.SELECT) {
                         val sel = selectedStroke
@@ -1386,9 +1490,39 @@ fun EditorScreen(
                                         maxX - minX,
                                         maxY - minY
                                     ),
-                                    style = Stroke(width = 2f / viewScale)
+                                    style = Stroke(width = 2f / pageViewState.scale)
                                 )
                             }
+                        }
+                    }
+                    // Selection frame around the selected text box
+                    // (Select mode, not editing): drawn in page coords
+                    // on this same canvas, so it sits exactly on the
+                    // canvas text. The move/resize handles are the
+                    // composables below, positioned from the same M.
+                    if (mode == EditorMode.SELECT && selectedTextId != null &&
+                        editingTextId == null
+                    ) {
+                        for (layer in layersWork) {
+                            if (layer.locked) continue
+                            val el = layer.texts.firstOrNull {
+                                it.id == selectedTextId
+                            } ?: continue
+                            val w = TextGeometry.wrapWidthPt(
+                                el, pageFormat.widthPt
+                            )
+                            val h = TextMetrics.boxHeightPt(
+                                el, pageFormat.widthPt
+                            )
+                            drawRect(
+                                color = selectionColor,
+                                topLeft = Offset(el.x, el.y),
+                                size = androidx.compose.ui.geometry.Size(w, h),
+                                style = Stroke(
+                                    width = 2f / pageViewState.scale
+                                )
+                            )
+                            break
                         }
                     }
                     } finally {
@@ -1397,370 +1531,220 @@ fun EditorScreen(
                 }
             }
 
-            // Text overlays live in a page-sized box pinned to the
-            // sheet and clipped to its edge; positions inside are
-            // page-local (the same pattern as the PDF page box).
-            // v0.13.1 fix — this MUST be requiredSize, not size:
-            // size() is coerced by the page-area Box's constraints
-            // (the viewport), so above fit zoom this box was only
-            // viewport-sized, and clipToBounds then clipped text to
-            // [viewOffset, viewOffset + viewportSize] instead of to
-            // the page. A text box at local x*viewScale inside it was
-            // cut on the right by the viewport's right edge, and once
-            // x*viewScale exceeded the viewport width it vanished
-            // entirely — even while its screen position
-            // (viewOffset + x*viewScale) was still on screen, which is
-            // why the highlight (drawn in the Canvas with the full
-            // transform, not through this box) stayed visible. With
-            // requiredSize the box is the true page rectangle at
-            // every zoom, so the only clip text ever sees is the
-            // page bounds, exactly like the ink clip in the Canvas.
-            Box(
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            viewOffset.x.roundToInt(),
-                            viewOffset.y.roundToInt()
-                        )
+            // Interaction overlay (v0.14.1): this section draws NO
+            // text. Display text lives on the Canvas above, inside M.
+            // What lives here is interaction only, and every position
+            // is computed from the same PageViewState M, in screen px,
+            // on every composition — so a pinch frame that moves the
+            // page moves the editing field and the handles in the
+            // same frame, with no stale offset and no dp layout box
+            // in between:
+            //  - the active editing field (the ONLY native view used
+            //    for text), at M(left, top), width = wrapWidth x scale;
+            //  - the Select move/resize handles for the selected box,
+            //    at M(box corners / top-center), fixed dp size so they
+            //    stay tappable at any zoom.
+            // Selection itself is hit-tested on the Canvas (the SELECT
+            // tap handler, via textAtPagePoint), not by a view.
+            val editingElement: TextElement? = editingTextId?.let { id ->
+                layersWork.firstNotNullOfOrNull { layer ->
+                    layer.texts.firstOrNull { it.id == id }
+                }
+            }
+            val selectedElement: TextElement? =
+                if (mode == EditorMode.SELECT && editingTextId == null) {
+                    selectedTextId?.let { id ->
+                        layersWork.firstNotNullOfOrNull { layer ->
+                            if (layer.locked) null
+                            else layer.texts.firstOrNull { it.id == id }
+                        }
                     }
-                    .requiredSize(
-                        width = (TextGeometry.pageSizePx(
-                            pageFormat.widthPt, pageFormat.heightPt, viewScale
-                        ).first / density).dp,
-                        height = (TextGeometry.pageSizePx(
-                            pageFormat.widthPt, pageFormat.heightPt, viewScale
-                        ).second / density).dp
-                    )
-                    .clipToBounds()
-            ) {
-            // Typed text elements (visible layers only)
-            for (layer in layersWork) {
-                if (!layer.visible) continue
-                for (element in layer.texts) {
-                    key(element.id) {
-                        val isEditing = element.id == editingTextId
-                        val isSelected = element.id == selectedTextId
-                        val position = Modifier.offset {
+                } else {
+                    null
+                }
+            if (editingElement != null) {
+                val element = editingElement
+                // M applied to (left, top), recomputed every frame:
+                // while editing, a pinch re-positions this field from
+                // the same M the Canvas text uses, so the caret never
+                // sits anywhere but on the box it edits.
+                val editScreen = pageViewState.toScreen(
+                    Offset(element.x, element.y)
+                )
+                val editPaddingDp =
+                    (element.paddingPt * pageViewState.scale / density).dp
+                BasicTextField(
+                    value = element.text,
+                    onValueChange = { newValue ->
+                        updateText(element.copy(text = newValue))
+                    },
+                    textStyle = textStyleForPage(
+                        element, pageViewState.scale, scaledDensity
+                    ),
+                    cursorBrush = SolidColor(Color(0xFF1565C0)),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        onDone = { commitEditing() }
+                    ),
+                    modifier = Modifier
+                        .offset {
                             IntOffset(
-                                (element.x * viewScale).roundToInt(),
-                                (element.y * viewScale).roundToInt()
+                                editScreen.x.roundToInt(),
+                                editScreen.y.roundToInt()
                             )
                         }
-                        if (isEditing) {
-                            // Editing inset is the stored page-unit padding
-                            // (4pt -> px via viewScale), not 6dp: glyphs sit
-                            // at exactly the same place as when not editing
-                            // and as in the export.
-                            val editPaddingDp =
-                                (element.paddingPt * viewScale / density).dp
-                            BasicTextField(
-                                value = element.text,
-                                onValueChange = { newValue ->
-                                    updateText(element.copy(text = newValue))
-                                },
-                                textStyle = textStyleForPage(
-                                    element, viewScale, scaledDensity
-                                ),
-                                cursorBrush = SolidColor(Color(0xFF1565C0)),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                                keyboardActions = KeyboardActions(
-                                    onDone = { commitEditing() }
-                                ),
-                                modifier = position
-                                    // requiredWidth, not width, for the
-                                    // same reason as the box above:
-                                    // width() would be coerced by the
-                                    // container's constraints, so the
-                                    // editing field (and its caret)
-                                    // would be cut at high zoom while
-                                    // the rendered text was not.
-                                    .requiredWidth(
-                                        (TextGeometry.wrapWidthPt(
-                                            element, pageFormat.widthPt
-                                        ) * viewScale / density).dp
-                                    )
-                                    .focusRequester(focusRequester)
-                                    .background(Color(0x143D5AFE), RoundedCornerShape(4.dp))
-                                    .defaultMinSize(minWidth = 140.dp, minHeight = 40.dp)
-                                    .padding(editPaddingDp)
+                        .requiredWidth(
+                            (TextGeometry.wrapWidthPt(
+                                element, pageFormat.widthPt
+                            ) * pageViewState.scale / density).dp
+                        )
+                        .focusRequester(focusRequester)
+                        .background(Color(0x143D5AFE), RoundedCornerShape(4.dp))
+                        .defaultMinSize(minWidth = 140.dp, minHeight = 40.dp)
+                        .padding(editPaddingDp)
+                )
+            }
+            if (selectedElement != null) {
+                val element = selectedElement
+                val primary = MaterialTheme.colorScheme.primary
+                val topLeft = pageViewState.toScreen(
+                    Offset(element.x, element.y)
+                )
+                val boxWpx = TextGeometry.wrapWidthPt(
+                    element, pageFormat.widthPt
+                ) * pageViewState.scale
+                val boxHpx = TextMetrics.boxHeightPt(
+                    element, pageFormat.widthPt
+                ) * pageViewState.scale
+                // Move handle: top-center of the box, from M. Dragging
+                // it moves the box; the stored position is written
+                // exactly once, at drag end, via moveCommit.
+                Box(
+                    Modifier
+                        .offset {
+                            IntOffset(
+                                (topLeft.x + boxWpx / 2f - 14f * density)
+                                    .roundToInt(),
+                                (topLeft.y - 7f * density).roundToInt()
                             )
-                        } else {
-                            // v0.14 lock: text is interactive ONLY in Select
-                            // mode, and only the selected box moves, resizes
-                            // or edits. In Draw (any tool) this Text has no
-                            // clickable and no pointer input at all, so
-                            // touches pass through to the Canvas: pen /
-                            // highlighter / eraser draw, Hand pans and
-                            // zooms, and Text creates only on empty page
-                            // (hit-tested in the Canvas tap handler).
-                            // The old code attached a detectTransformGestures
-                            // to every interactive box: any drag or pinch
-                            // over text wrote pan / viewScale straight into
-                            // the stored x/y (and zoom into the font size),
-                            // on every event, for unselected boxes too.
-                            // That is the drift: a page zoom whose centroid
-                            // moves — and, as viewScale falls, every pan
-                            // delta divided by a smaller scale — moved the
-                            // stored position toward the gesture, i.e.
-                            // toward the upper-left when zooming out, and
-                            // the next save or tab switch made it permanent.
-                            // It is removed entirely; the only gestures on
-                            // a text box are the Select frame's handles.
-                            val isSelectable = mode == EditorMode.SELECT &&
-                                editingTextId == null && !layer.locked
-                            // Transient drag/resize for THIS box only.
-                            val dragging = textDragId == element.id
-                            val resizing = textResizeId == element.id
-                            val movePos = if (dragging) {
-                                TextGeometry.moveCommit(
-                                    textDragStart.x, textDragStart.y,
-                                    textDragTotalPx.x, textDragTotalPx.y,
-                                    viewScale
-                                )
-                            } else {
-                                null
-                            }
-                            val resizePos = if (resizing) {
-                                TextGeometry.resizeCommit(
-                                    textResizeStartX, textResizeStartWidth,
-                                    textResizeTotalDxPx, viewScale,
-                                    textResizeLeftCorner, pageFormat.widthPt
-                                )
-                            } else {
-                                null
-                            }
-                            val renderX = movePos?.first
-                                ?: resizePos?.first ?: element.x
-                            val renderY = movePos?.second ?: element.y
-                            // Wrap width is the stored box width in page
-                            // points (to the page edge by default); the
-                            // exporter wraps at this same width.
-                            val renderWidthPt = resizePos?.second
-                                ?: TextGeometry.wrapWidthPt(
-                                    element, pageFormat.widthPt
-                                )
-                            val renderPosition = Modifier.offset {
-                                IntOffset(
-                                    (renderX * viewScale).roundToInt(),
-                                    (renderY * viewScale).roundToInt()
-                                )
-                            }
-                            // Glyph inset is the stored page-unit padding,
-                            // not a dp inset: the old 4dp inset shifted
-                            // glyphs by 4*density/viewScale pt on screen
-                            // and by 0 in the export — the left/up offset
-                            // in the PDF.
-                            val glyphPaddingDp =
-                                (element.paddingPt * viewScale / density).dp
-                            val renderWidthDp = (
-                                renderWidthPt * viewScale / density
-                                ).dp
-                            Box(
-                                modifier = renderPosition
-                                    // requiredWidth, not width: the box
-                                    // width in page points * viewScale
-                                    // must survive the container's
-                                    // constraints, or the text is
-                                    // measured at viewport width and
-                                    // clipped on the right as zoom
-                                    // grows (see the box comment).
-                                    .requiredWidth(renderWidthDp)
-                            ) {
-                                Text(
-                                    text = element.text,
-                                    style = textStyleForPage(
-                                        element, viewScale, scaledDensity
-                                    ),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(
-                                            if (isSelected) {
-                                                Color(0x143D5AFE)
-                                            } else {
-                                                Color.Transparent
-                                            },
-                                            RoundedCornerShape(4.dp)
-                                        )
-                                        .then(
-                                            if (isSelectable) {
-                                                Modifier.clickable {
-                                                    if (isSelected) {
-                                                        // Tap a selected
-                                                        // box to edit it.
-                                                        editingTextId = element.id
-                                                    } else {
-                                                        selectedTextId = element.id
-                                                        activeLayerId = layer.id
-                                                        selectedStroke = null
-                                                    }
-                                                }
-                                            } else {
-                                                Modifier
-                                            }
-                                        )
-                                        .padding(glyphPaddingDp)
-                                )
-                                if (isSelectable && isSelected) {
-                                    val primary =
-                                        MaterialTheme.colorScheme.primary
-                                    // Selection frame around the box.
-                                    Box(
-                                        Modifier
-                                            .matchParentSize()
-                                            .border(
-                                                1.5.dp, primary,
-                                                RoundedCornerShape(2.dp)
-                                            )
+                        }
+                        .size(28.dp)
+                        .background(primary, CircleShape)
+                        .border(1.dp, Color.White, CircleShape)
+                        .pointerInput(element.id) {
+                            detectDragGestures(
+                                onDragStart = {
+                                    textDragId = element.id
+                                    textDragStart = Offset(
+                                        element.x, element.y
                                     )
-                                    // Move handle: top-center, above the
-                                    // frame. Dragging it moves the box;
-                                    // the stored position is written
-                                    // exactly once, at drag end, via
-                                    // moveCommit (screenToPage delta).
-                                    Box(
-                                        Modifier
-                                            .align(Alignment.TopCenter)
-                                            .offset(y = (-7).dp)
-                                            .size(28.dp)
-                                            .background(primary, CircleShape)
-                                            .border(
-                                                1.dp, Color.White, CircleShape
-                                            )
-                                            .pointerInput(element.id) {
-                                                detectDragGestures(
-                                                    onDragStart = {
-                                                        textDragId = element.id
-                                                        textDragStart = Offset(
-                                                            element.x, element.y
-                                                        )
-                                                        textDragTotalPx = Offset.Zero
-                                                    },
-                                                    onDragEnd = {
-                                                        val committed =
-                                                            TextGeometry.moveCommit(
-                                                                textDragStart.x,
-                                                                textDragStart.y,
-                                                                textDragTotalPx.x,
-                                                                textDragTotalPx.y,
-                                                                viewScale
-                                                            )
-                                                        updateText(
-                                                            element.copy(
-                                                                x = committed.first,
-                                                                y = committed.second
-                                                            )
-                                                        )
-                                                        textDragId = null
-                                                        textDragTotalPx = Offset.Zero
-                                                    },
-                                                    onDragCancel = {
-                                                        textDragId = null
-                                                        textDragTotalPx = Offset.Zero
-                                                    },
-                                                    onDrag = { change, dragAmount ->
-                                                        change.consume()
-                                                        if (!suppressDrawing) {
-                                                            textDragTotalPx += Offset(
-                                                                dragAmount.x,
-                                                                dragAmount.y
-                                                            )
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                            .clickable {}
-                                    )
-                                    // Corner resize handles: dragging one
-                                    // changes the stored wrap width (left
-                                    // corners also move x, right edge
-                                    // fixed); the stored width is written
-                                    // exactly once, at drag end, via
-                                    // resizeCommit. Font size is not
-                                    // changed by a resize — use the size
-                                    // controls for that.
-                                    listOf(
-                                        Triple(
-                                            Alignment.TopStart,
-                                            Offset(-12f, -12f), true
-                                        ),
-                                        Triple(
-                                            Alignment.TopEnd,
-                                            Offset(12f, -12f), false
-                                        ),
-                                        Triple(
-                                            Alignment.BottomStart,
-                                            Offset(-12f, 12f), true
-                                        ),
-                                        Triple(
-                                            Alignment.BottomEnd,
-                                            Offset(12f, 12f), false
+                                    textDragTotalPx = Offset.Zero
+                                },
+                                onDragEnd = {
+                                    val committed =
+                                        TextGeometry.moveCommit(
+                                            textDragStart.x,
+                                            textDragStart.y,
+                                            textDragTotalPx.x,
+                                            textDragTotalPx.y,
+                                            pageViewState.scale
                                         )
-                                    ).forEach { (align, off, left) ->
-                                        Box(
-                                            Modifier
-                                                .align(align)
-                                                .offset(off.x.dp, off.y.dp)
-                                                .size(24.dp)
-                                                .background(primary, CircleShape)
-                                                .border(
-                                                    1.dp, Color.White,
-                                                    CircleShape
-                                                )
-                                                .pointerInput(element.id, left) {
-                                                    detectDragGestures(
-                                                        onDragStart = {
-                                                            textResizeId = element.id
-                                                            textResizeStartX = element.x
-                                                            textResizeStartWidth =
-                                                                TextGeometry.wrapWidthPt(
-                                                                    element,
-                                                                    pageFormat.widthPt
-                                                                )
-                                                            textResizeTotalDxPx = 0f
-                                                            textResizeLeftCorner = left
-                                                        },
-                                                        onDragEnd = {
-                                                            val committed =
-                                                                TextGeometry.resizeCommit(
-                                                                    textResizeStartX,
-                                                                    textResizeStartWidth,
-                                                                    textResizeTotalDxPx,
-                                                                    viewScale,
-                                                                    textResizeLeftCorner,
-                                                                    pageFormat.widthPt
-                                                                )
-                                                            updateText(
-                                                                element.copy(
-                                                                    x = committed.first,
-                                                                    widthPt = committed.second
-                                                                )
-                                                            )
-                                                            textResizeId = null
-                                                            textResizeTotalDxPx = 0f
-                                                        },
-                                                        onDragCancel = {
-                                                            textResizeId = null
-                                                            textResizeTotalDxPx = 0f
-                                                        },
-                                                        onDrag = { change, dragAmount ->
-                                                            change.consume()
-                                                            if (!suppressDrawing) {
-                                                                textResizeTotalDxPx +=
-                                                                    dragAmount.x
-                                                            }
-                                                        }
-                                                    )
-                                                }
-                                                .clickable {}
+                                    updateText(
+                                        element.copy(
+                                            x = committed.first,
+                                            y = committed.second
+                                        )
+                                    )
+                                    textDragId = null
+                                    textDragTotalPx = Offset.Zero
+                                },
+                                onDragCancel = {
+                                    textDragId = null
+                                    textDragTotalPx = Offset.Zero
+                                },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    if (!suppressDrawing) {
+                                        textDragTotalPx += Offset(
+                                            dragAmount.x, dragAmount.y
                                         )
                                     }
                                 }
-                            }
+                            )
                         }
-                    }
+                        .clickable {}
+                )
+                // Corner resize handles: at M(box corners), fixed size.
+                // Dragging one changes the stored wrap width (left
+                // corners also move x, right edge fixed); written
+                // exactly once, at drag end, via resizeCommit.
+                listOf(
+                    Triple(0f, 0f, true),
+                    Triple(boxWpx, 0f, false),
+                    Triple(0f, boxHpx, true),
+                    Triple(boxWpx, boxHpx, false)
+                ).forEach { (dxPx, dyPx, left) ->
+                    Box(
+                        Modifier
+                            .offset {
+                                IntOffset(
+                                    (topLeft.x + dxPx - 12f * density)
+                                        .roundToInt(),
+                                    (topLeft.y + dyPx - 12f * density)
+                                        .roundToInt()
+                                )
+                            }
+                            .size(24.dp)
+                            .background(primary, CircleShape)
+                            .border(1.dp, Color.White, CircleShape)
+                            .pointerInput(element.id, left) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        textResizeId = element.id
+                                        textResizeStartX = element.x
+                                        textResizeStartWidth =
+                                            TextGeometry.wrapWidthPt(
+                                                element,
+                                                pageFormat.widthPt
+                                            )
+                                        textResizeTotalDxPx = 0f
+                                        textResizeLeftCorner = left
+                                    },
+                                    onDragEnd = {
+                                        val committed =
+                                            TextGeometry.resizeCommit(
+                                                textResizeStartX,
+                                                textResizeStartWidth,
+                                                textResizeTotalDxPx,
+                                                pageViewState.scale,
+                                                textResizeLeftCorner,
+                                                pageFormat.widthPt
+                                            )
+                                        updateText(
+                                            element.copy(
+                                                x = committed.first,
+                                                widthPt = committed.second
+                                            )
+                                        )
+                                        textResizeId = null
+                                        textResizeTotalDxPx = 0f
+                                    },
+                                    onDragCancel = {
+                                        textResizeId = null
+                                        textResizeTotalDxPx = 0f
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        if (!suppressDrawing) {
+                                            textResizeTotalDxPx +=
+                                                dragAmount.x
+                                        }
+                                    }
+                                )
+                            }
+                            .clickable {}
+                    )
                 }
-            }
-
             }
 
             // Zoom percentage, shown briefly while zooming.
@@ -1776,7 +1760,7 @@ fun EditorScreen(
                         shadowElevation = 6.dp
                     ) {
                         Text(
-                            text = "${(viewScale / fitScaleNow * 100).roundToInt()}%",
+                            text = "${(pageViewState.scale / fitScaleNow * 100).roundToInt()}%",
                             style = MaterialTheme.typography.labelLarge,
                             color = DesignTokens.TextPrimary,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
