@@ -445,9 +445,12 @@ fun EditorScreen(
     var textDragGuidesV by remember { mutableStateOf<List<Float>>(emptyList()) }
     var textDragGuidesH by remember { mutableStateOf<List<Float>>(emptyList()) }
     // Alignment snap, off in Settings ("snap_to_guides", default on).
+    // LocalContext directly: toolContext is declared later in this
+    // composable, and a local must be declared before it is used.
     val snapToGuides = remember {
-        toolContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getBoolean("snap_to_guides", true)
+        LocalContext.current.getSharedPreferences(
+            "settings", Context.MODE_PRIVATE
+        ).getBoolean("snap_to_guides", true)
     }
     // One nudge burst (press to release) records one undo step.
     var nudgeBurst by remember {
