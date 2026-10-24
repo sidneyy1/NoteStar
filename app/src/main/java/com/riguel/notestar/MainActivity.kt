@@ -21,6 +21,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -33,15 +34,17 @@ import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.NoteStorage
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PageTemplate
+import com.riguel.notestar.ui.CreateNoteScreen
+import com.riguel.notestar.ui.DocTab
 import com.riguel.notestar.ui.EditorScreen
 import com.riguel.notestar.ui.HomeScreen
 import com.riguel.notestar.ui.PdfNoteScreen
 import kotlinx.coroutines.launch
 
-/** Accent choices for the custom theme. */
+/** Accent choices for the custom theme; the design accent is the first one. */
 val ACCENT_COLORS = listOf(
-    Color(0xFF1565C0), // blue
-    Color(0xFF00897B), // teal
+    Color(0xFF1E8FB5), // teal-blue (design accent)
+    Color(0xFF00897B), // sea green
     Color(0xFF6A1B9A), // purple
     Color(0xFFEF6C00), // orange
     Color(0xFFAD1457)  // pink
@@ -105,14 +108,48 @@ fun NoteStarApp(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    var openDoc by remember { mutableStateOf<NoteDocument?>(null) }
-    var newTemplate by remember { mutableStateOf<PageTemplate?>(null) }
-    var newNoteTitle by remember { mutableStateOf("") }
+    // Open documents live in browser-style tabs above the editors.
+    var openTabs by remember { mutableStateOf<List<NoteDocument>>(emptyList()) }
+    var activeTabId by remember { mutableStateOf<String?>(null) }
+    var showHome by remember { mutableStateOf(true) }
+    var showCreate by remember { mutableStateOf(false) }
     var refresh by remember { mutableStateOf(0) }
     val notes = remember(refresh) { NoteStorage.listNotes(context) }
 
+    val activeDoc = openTabs.firstOrNull { it.id == activeTabId }
+    val docTabs = openTabs.map { DocTab(it.id, it.title, it.pdf != null) }
+
     fun notify(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    fun openInTab(doc: NoteDocument) {
+        if (openTabs.none { it.id == doc.id }) {
+            openTabs = openTabs + doc
+        }
+        activeTabId = doc.id
+        showHome = false
+    }
+
+    fun closeTab(id: String) {
+        val wasActive = id == activeTabId
+        openTabs = openTabs.filterNot { it.id == id }
+        if (wasActive) {
+            val next = openTabs.lastOrNull()
+            if (next != null) {
+                activeTabId = next.id
+            } else {
+                activeTabId = null
+                showHome = true
+            }
+        }
+    }
+
+    fun saveDoc(updated: NoteDocument, message: String) {
+        NoteStorage.saveNote(context, updated)
+        openTabs = openTabs.map { if (it.id == updated.id) updated else it }
+        notify(message)
+        refresh++
     }
 
     // Backup to shared storage (Documents/NoteStar). Android 8/9 needs the
@@ -140,79 +177,87 @@ fun NoteStarApp(
         }
     }
 
-    val doc = openDoc
-    val creating = newTemplate != null
-
     Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { scaffoldPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(scaffoldPadding)
         ) {
-    when {
-        creating || doc != null -> {
-            val initialDoc = remember(doc?.id, newTemplate, newNoteTitle) {
-                doc ?: NoteDocument(
-                    id = NoteStorage.newId(),
-                    title = newNoteTitle,
-                    createdAt = System.currentTimeMillis(),
-                    updatedAt = System.currentTimeMillis(),
-                    pages = listOf(Page.create(newTemplate ?: PageTemplate.BLANK))
-                )
-            }
-            if (initialDoc.pdf != null) {
-                PdfNoteScreen(
-                    initialDoc = initialDoc,
-                    pdfFile = NoteStorage.pdfFile(context, initialDoc.pdf.fileName),
-                    onBack = {
-                        openDoc = null
-                        newTemplate = null
-                        newNoteTitle = ""
-                        refresh++
-                    },
-                    onSave = { updated ->
-                        NoteStorage.saveNote(context, updated)
-                        notify("Annotations saved")
-                        refresh++
-                    },
-                    onEnterPip = onEnterPip
-                )
-            } else {
-                EditorScreen(
-                    initialDoc = initialDoc,
-                    onBack = {
-                        openDoc = null
-                        newTemplate = null
-                        newNoteTitle = ""
-                        refresh++
-                    },
-                    onSave = { updated ->
-                        NoteStorage.saveNote(context, updated)
-                        if (openDoc == null) openDoc = updated
-                        notify("Note saved")
-                        refresh++
-                    },
-                    onExcerptPage = { excerptTitle, page ->
-                        val now = System.currentTimeMillis()
-                        val excerpt = NoteDocument(
-                            id = NoteStorage.newId(),
-                            title = excerptTitle,
-                            createdAt = now,
-                            updatedAt = now,
-                            pages = listOf(
-                                page.copy(id = "p" + System.nanoTime().toString())
+            when {
+                showCreate -> {
+                    CreateNoteScreen(
+                        onCancel = { showCreate = false },
+                        onCreate = { template, title, tags, cover ->
+                            val now = System.currentTimeMillis()
+                            val doc = NoteDocument(
+                                id = NoteStorage.newId(),
+                                title = title.ifBlank { "Untitled" },
+                                tags = tags,
+                                createdAt = now,
+                                updatedAt = now,
+                                pages = listOf(Page.create(template)),
+                                coverColorValue = cover
                             )
-                        )
-                        NoteStorage.saveNote(context, excerpt)
-                        notify("Page saved as a new note: $excerptTitle")
-                        refresh++
-                    },
-                    onEnterPip = onEnterPip
-                )
-            }
-        }
-        else -> {
-            HomeScreen(
+                            NoteStorage.saveNote(context, doc)
+                            showCreate = false
+                            openInTab(doc)
+                            refresh++
+                        }
+                    )
+                }
+                !showHome && activeDoc != null -> {
+                    key(activeDoc.id) {
+                        if (activeDoc.pdf != null) {
+                            PdfNoteScreen(
+                                initialDoc = activeDoc,
+                                pdfFile = NoteStorage.pdfFile(
+                                    context, activeDoc.pdf.fileName
+                                ),
+                                onBack = {
+                                    showHome = true
+                                    refresh++
+                                },
+                                onSave = { updated -> saveDoc(updated, "Annotations saved") },
+                                onEnterPip = onEnterPip,
+                                tabs = docTabs,
+                                onTabSelect = { id -> activeTabId = id },
+                                onTabClose = { id -> closeTab(id) }
+                            )
+                        } else {
+                            EditorScreen(
+                                initialDoc = activeDoc,
+                                onBack = {
+                                    showHome = true
+                                    refresh++
+                                },
+                                onSave = { updated -> saveDoc(updated, "Note saved") },
+                                onExcerptPage = { excerptTitle, page ->
+                                    val now = System.currentTimeMillis()
+                                    val excerpt = NoteDocument(
+                                        id = NoteStorage.newId(),
+                                        title = excerptTitle,
+                                        createdAt = now,
+                                        updatedAt = now,
+                                        pages = listOf(
+                                            page.copy(
+                                                id = "p" + System.nanoTime().toString()
+                                            )
+                                        )
+                                    )
+                                    NoteStorage.saveNote(context, excerpt)
+                                    notify("Page saved as a new note: $excerptTitle")
+                                    refresh++
+                                },
+                                onEnterPip = onEnterPip,
+                                tabs = docTabs,
+                                onTabSelect = { id -> activeTabId = id },
+                                onTabClose = { id -> closeTab(id) }
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    HomeScreen(
                         notes = notes,
                         darkMode = darkMode,
                         accentColors = ACCENT_COLORS,
@@ -220,20 +265,38 @@ fun NoteStarApp(
                         onToggleDarkMode = onToggleDarkMode,
                         onAccentSelected = onAccentSelected,
                         onOpen = { meta ->
-                            openDoc = NoteStorage.loadNote(context, meta.id)
+                            NoteStorage.loadNote(context, meta.id)?.let { openInTab(it) }
                         },
-                        onCreate = { template, title ->
-                            newTemplate = template
-                            newNoteTitle = title
+                        onShowCreate = { showCreate = true },
+                        onQuickCreate = {
+                            val now = System.currentTimeMillis()
+                            val doc = NoteDocument(
+                                id = NoteStorage.newId(),
+                                title = "",
+                                createdAt = now,
+                                updatedAt = now,
+                                pages = listOf(Page.create(PageTemplate.BLANK))
+                            )
+                            NoteStorage.saveNote(context, doc)
+                            openInTab(doc)
+                            refresh++
                         },
                         onDelete = { meta ->
                             NoteStorage.deleteNote(context, meta.id)
+                            openTabs = openTabs.filterNot { it.id == meta.id }
+                            if (activeTabId == meta.id) {
+                                activeTabId = openTabs.lastOrNull()?.id
+                            }
                             refresh++
                         },
                         onEditTags = { meta, tags ->
                             val loaded = NoteStorage.loadNote(context, meta.id)
                             if (loaded != null) {
-                                NoteStorage.saveNote(context, loaded.copy(tags = tags))
+                                val updated = loaded.copy(tags = tags)
+                                NoteStorage.saveNote(context, updated)
+                                openTabs = openTabs.map {
+                                    if (it.id == updated.id) updated else it
+                                }
                                 refresh++
                             }
                         },
