@@ -44,9 +44,11 @@ object ToolPrefs {
 
     /** Prepends [color], deduped, capped at [MAX_RECENTS]. */
     fun pushRecent(context: Context, color: Color) {
-        val updated = (listOf(color) + readList(context, KEY_RECENTS))
-            .distinct()
-            .take(MAX_RECENTS)
+        // Single implementation lives in ToolOptionsLogic (pure, and
+        // unit-tested); this only converts at the storage boundary.
+        val current = readList(context, KEY_RECENTS).map { it.toArgb() }
+        val updated = pushRecentColors(current, color.toArgb(), MAX_RECENTS)
+            .map { Color(it) }
         writeList(context, KEY_RECENTS, updated)
     }
 
