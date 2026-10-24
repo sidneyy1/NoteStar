@@ -102,6 +102,7 @@ fun NoteStarApp(
 
     var openDoc by remember { mutableStateOf<NoteDocument?>(null) }
     var newTemplate by remember { mutableStateOf<PageTemplate?>(null) }
+    var newNoteTitle by remember { mutableStateOf("") }
     var refresh by remember { mutableStateOf(0) }
     val notes = remember(refresh) { NoteStorage.listNotes(context) }
 
@@ -120,10 +121,10 @@ fun NoteStarApp(
         ) {
     when {
         creating || doc != null -> {
-            val initialDoc = remember(doc?.id, newTemplate) {
+            val initialDoc = remember(doc?.id, newTemplate, newNoteTitle) {
                 doc ?: NoteDocument(
                     id = NoteStorage.newId(),
-                    title = "",
+                    title = newNoteTitle,
                     createdAt = System.currentTimeMillis(),
                     updatedAt = System.currentTimeMillis(),
                     pages = listOf(Page.create(newTemplate ?: PageTemplate.BLANK))
@@ -136,6 +137,7 @@ fun NoteStarApp(
                     onBack = {
                         openDoc = null
                         newTemplate = null
+                        newNoteTitle = ""
                         refresh++
                     },
                     onSave = { updated ->
@@ -151,6 +153,7 @@ fun NoteStarApp(
                     onBack = {
                         openDoc = null
                         newTemplate = null
+                        newNoteTitle = ""
                         refresh++
                     },
                     onSave = { updated ->
@@ -189,7 +192,10 @@ fun NoteStarApp(
                         onOpen = { meta ->
                             openDoc = NoteStorage.loadNote(context, meta.id)
                         },
-                        onCreate = { template -> newTemplate = template },
+                        onCreate = { template, title ->
+                            newTemplate = template
+                            newNoteTitle = title
+                        },
                         onDelete = { meta ->
                             NoteStorage.deleteNote(context, meta.id)
                             refresh++
