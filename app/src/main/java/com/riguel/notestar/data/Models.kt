@@ -102,7 +102,9 @@ data class NoteDocument(
     val createdAt: Long = 0L,
     val updatedAt: Long = 0L,
     val pdf: PdfAttachment? = null,
-    val pages: List<Page> = listOf(Page.create(PageTemplate.BLANK))
+    val pages: List<Page> = listOf(Page.create(PageTemplate.BLANK)),
+    /** Optional cover color (ARGB as a Compose Color value), chosen at creation. */
+    val coverColorValue: ULong? = null
 )
 
 /** Lightweight info about a saved note, shown in the notebook list. */
@@ -113,5 +115,6 @@ data class NoteMeta(
     val template: PageTemplate = PageTemplate.BLANK,
     val tags: List<String> = emptyList(),
     val isPdf: Boolean = false,
-    val pageCount: Int = 1
+    val pageCount: Int = 1,
+    val coverColorValue: ULong? = null
 )
