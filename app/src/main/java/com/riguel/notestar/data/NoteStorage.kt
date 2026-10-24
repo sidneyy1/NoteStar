@@ -67,17 +67,27 @@ object NoteStorage {
     }
 
     fun saveNote(context: Context, doc: NoteDocument) {
+        writeNoteInternal(context, doc)
+        // Best-effort mirror into shared storage so notes survive uninstall.
+        BackupManager.backupNote(context, doc)
+        doc.pdf?.let { BackupManager.backupPdf(context, it.fileName) }
+    }
+
+    /** Internal-storage write only (no backup) — used when restoring. */
+    fun writeNoteInternal(context: Context, doc: NoteDocument) {
         noteFile(context, doc.id).writeText(NoteJson.toJson(doc).toString())
     }
 
     fun deleteNote(context: Context, id: String) {
         // Clean up the imported PDF copy too, if this note had one.
-        loadNote(context, id)?.pdf?.let { pdf ->
-            val file = pdfFile(context, pdf.fileName)
-            if (file.exists()) file.delete()
+        val pdfName = loadNote(context, id)?.pdf?.fileName
+        if (pdfName != null) {
+            val pdf = pdfFile(context, pdfName)
+            if (pdf.exists()) pdf.delete()
         }
         val file = noteFile(context, id)
         if (file.exists()) file.delete()
+        BackupManager.deleteBackup(context, id, pdfName)
     }
 
     /**
