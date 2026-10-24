@@ -10,6 +10,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Surface
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.ui.draw.alpha
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameMillis
 import kotlinx.coroutines.delay
 
 import androidx.compose.foundation.Canvas
@@ -104,8 +106,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.focus.FocusRequester
@@ -439,6 +444,39 @@ fun EditorScreen(
     var inkColor by remember { mutableStateOf(Color.Black) }
     var thickness by remember { mutableStateOf(3f) }
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
+
+    // Two-finger page gestures (see the interceptor on the page area):
+    // while one is running — and until every finger lifts — drawing input
+    // is suppressed, and whatever the first finger had started is undone.
+    var suppressDrawing by remember { mutableStateOf(false) }
+    var eraserBackup by remember {
+        mutableStateOf<Pair<String, List<NoteStroke>>?>(null)
+    }
+    var selectionDragBackup by remember {
+        mutableStateOf<Triple<String, Int, List<StrokePoint>>?>(null)
+    }
+    val editorScope = rememberCoroutineScope()
+
+    /** Discards whatever a half-finished one-finger action changed. */
+    fun cancelInProgressGesture() {
+        currentPoints = emptyList()
+        eraserBackup?.let { (layerId, strokes) ->
+            val layer = layersWork.firstOrNull { it.id == layerId }
+            if (layer != null) {
+                layer.strokes.clear()
+                layer.strokes.addAll(strokes)
+            }
+        }
+        eraserBackup = null
+        selectionDragBackup?.let { (layerId, index, points) ->
+            val layer = layersWork.firstOrNull { it.id == layerId }
+            val stroke = layer?.strokes?.getOrNull(index)
+            if (layer != null && stroke != null) {
+                layer.strokes[index] = stroke.copy(points = points)
+            }
+        }
+        selectionDragBackup = null
+    }
     var beautifyOn by remember { mutableStateOf(false) }
     var chromeVisible by remember { mutableStateOf(true) }
     var popoverOpen by remember { mutableStateOf(false) }
@@ -677,6 +715,181 @@ fun EditorScreen(
             }
         }
 
+    // Two-finger pinch/pan for every mode except Hand (which has its own
+    // transform detector). Runs on the Initial pass, ahead of the drawing
+    // detectors: the moment a second finger lands, the in-progress action
+    // is discarded, the gesture's events are consumed, and drawing stays
+    // suppressed until every finger has lifted. A stylus counts as
+    // drawing, never as a pinch finger; one touch beside a stylus is
+    // treated as a palm and ignored.
+    val multiTouchPageGestures = if (mode != EditorMode.HAND) {
+        Modifier.pointerInput(mode, fitScaleNow, pageFormat) {
+            fun clampPinchOffset(o: Offset, scale: Float): Offset {
+                val cs = canvasSize
+                if (cs.width == 0) return o
+                val keep = 48f * density
+                val pw = pageFormat.widthPt * scale
+                val ph = pageFormat.heightPt * scale
+                val xRange = (keep - pw)..(cs.width - keep)
+                val yRange = (keep - ph)..(cs.height - keep)
+                return Offset(
+                    x = if (xRange.start <= xRange.endInclusive) {
+                        o.x.coerceIn(xRange)
+                    } else {
+                        (cs.width - pw) / 2f
+                    },
+                    y = if (yRange.start <= yRange.endInclusive) {
+                        o.y.coerceIn(yRange)
+                    } else {
+                        (cs.height - ph) / 2f
+                    }
+                )
+            }
+
+            awaitPointerEventScope {
+                var pinching = false
+                var prevCentroid = Offset.Zero
+                var prevDistance = 0f
+                var velocity = Offset.Zero
+                var lastEventMs = 0L
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val touches = event.changes.filter {
+                        it.type == PointerType.Touch && it.pressed
+                    }
+                    val stylusDown = event.changes.any {
+                        it.type == PointerType.Stylus && it.pressed
+                    }
+                    if (touches.size >= 2 && !stylusDown) {
+                        var centroid = Offset.Zero
+                        for (change in touches) centroid += change.position
+                        centroid /= touches.size.toFloat()
+                        var distance = 0f
+                        for (i in touches.indices) {
+                            for (j in i + 1 until touches.size) {
+                                distance = maxOf(
+                                    distance,
+                                    (touches[i].position - touches[j].position)
+                                        .getDistance()
+                                )
+                            }
+                        }
+                        if (!pinching) {
+                            pinching = true
+                            suppressDrawing = true
+                            cancelInProgressGesture()
+                            prevCentroid = centroid
+                            prevDistance = distance
+                            velocity = Offset.Zero
+                            lastEventMs = touches.first().uptimeMillis
+                        } else {
+                            val zoom = if (prevDistance > 0f) {
+                                distance / prevDistance
+                            } else {
+                                1f
+                            }
+                            val pan = centroid - prevCentroid
+                            // Rubber-band past the limits; the release
+                            // handler snaps the zoom back into range.
+                            val raw = viewScale * zoom
+                            val clamped = raw.coerceIn(
+                                fitScaleNow, fitScaleNow * 4f
+                            )
+                            val banded = when {
+                                raw > clamped ->
+                                    clamped + (raw - clamped) * 0.35f
+                                raw < clamped ->
+                                    clamped - (clamped - raw) * 0.35f
+                                else -> raw
+                            }
+                            val factor = banded / viewScale
+                            viewOffset = clampPinchOffset(
+                                Offset(
+                                    x = centroid.x -
+                                        (centroid.x - viewOffset.x) * factor +
+                                        pan.x,
+                                    y = centroid.y -
+                                        (centroid.y - viewOffset.y) * factor +
+                                        pan.y
+                                ),
+                                banded
+                            )
+                            viewScale = banded
+                            val nowMs = touches.first().uptimeMillis
+                            val dt = (nowMs - lastEventMs).toFloat()
+                            if (dt > 0f) {
+                                val v = pan / dt * 1000f
+                                velocity = velocity * 0.6f + v * 0.4f
+                            }
+                            lastEventMs = nowMs
+                            prevCentroid = centroid
+                            prevDistance = distance
+                        }
+                        event.changes.forEach {
+                            if (it.pressed && it.type == PointerType.Touch) {
+                                it.consume()
+                            }
+                        }
+                    } else if (pinching) {
+                        pinching = false
+                        // Snap a rubber-banded zoom back into range,
+                        // anchored at the last pinch center.
+                        val target = viewScale.coerceIn(
+                            fitScaleNow, fitScaleNow * 4f
+                        )
+                        if (target != viewScale) {
+                            val f = target / viewScale
+                            viewOffset = clampPinchOffset(
+                                Offset(
+                                    x = prevCentroid.x -
+                                        (prevCentroid.x - viewOffset.x) * f,
+                                    y = prevCentroid.y -
+                                        (prevCentroid.y - viewOffset.y) * f
+                                ),
+                                target
+                            )
+                            viewScale = target
+                        }
+                        // Fling: keep the two-finger pan gliding with a
+                        // natural exponential decay, clamped to the page.
+                        if (velocity.getDistance() > 300f) {
+                            val flingVelocity = velocity
+                            editorScope.launch {
+                                var v = flingVelocity
+                                var last = -1L
+                                while (v.getDistance() > 40f) {
+                                    val frame = withFrameMillis { it }
+                                    if (last >= 0) {
+                                        val dt = (frame - last) / 1000f
+                                        if (dt > 0f) {
+                                            val proposed = Offset(
+                                                viewOffset.x + v.x * dt,
+                                                viewOffset.y + v.y * dt
+                                            )
+                                            val clampedNow = clampPinchOffset(
+                                                proposed, viewScale
+                                            )
+                                            viewOffset = clampedNow
+                                            if (clampedNow != proposed) break
+                                            v *= kotlin.math.exp(-3.2f * dt)
+                                        }
+                                    }
+                                    last = frame
+                                }
+                            }
+                        }
+                    }
+                    if (event.changes.none { it.pressed }) {
+                        suppressDrawing = false
+                        pinching = false
+                    }
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
+
         // Page area
         Box(
             modifier = Modifier
@@ -685,6 +898,7 @@ fun EditorScreen(
                 .background(DesignTokens.CanvasBackground)
                 .onSizeChanged { canvasSize = it }
                 .clipToBounds()
+                .then(multiTouchPageGestures)
         ) {
             fun toPage(screen: Offset, pressure: Float = 1f): StrokePoint {
                 val p = PageTransform.toPage(screen, viewScale, viewOffset)
@@ -693,7 +907,7 @@ fun EditorScreen(
 
             val gestureModifier = when (mode) {
                 EditorMode.HAND -> Modifier
-                    .pointerInput(mode) {
+                    .pointerInput(mode, fitScaleNow) {
                         detectTransformGestures { centroid, pan, zoom, _ ->
                             // Zoom clamps to [fit, 400% of fit]; pan keeps
                             // at least 48dp of the page on screen.
@@ -710,7 +924,7 @@ fun EditorScreen(
                             viewScale = newScale
                         }
                     }
-                    .pointerInput(mode) {
+                    .pointerInput(mode, fitScaleNow) {
                         detectTapGestures(
                             onDoubleTap = { pos ->
                                 if (viewScale > fitScaleNow * 1.05f) {
@@ -734,6 +948,7 @@ fun EditorScreen(
                     coroutineScope {
                         launch {
                             detectTapGestures { screen ->
+                                if (suppressDrawing) return@detectTapGestures
                                 val pagePoint = toPage(screen)
                                 var found: Pair<String, Int>? = null
                                 for (layer in layersWork.asReversed()) {
@@ -764,11 +979,29 @@ fun EditorScreen(
                         }
                         launch {
                             detectDragGestures(
-                                onDragStart = { },
-                                onDragEnd = { },
+                                onDragStart = {
+                                    val sel = selectedStroke
+                                    if (sel != null) {
+                                        val layer = layersWork
+                                            .firstOrNull { it.id == sel.first }
+                                        val s = layer?.strokes
+                                            ?.getOrNull(sel.second)
+                                        if (layer != null && s != null) {
+                                            selectionDragBackup = Triple(
+                                                layer.id, sel.second, s.points
+                                            )
+                                        }
+                                    }
+                                },
+                                onDragEnd = { selectionDragBackup = null },
+                                onDragCancel = { cancelInProgressGesture() },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
-                                    val sel = selectedStroke
+                                    val sel = if (suppressDrawing) {
+                                        null
+                                    } else {
+                                        selectedStroke
+                                    }
                                     if (sel != null) {
                                         val layer = layersWork.firstOrNull { it.id == sel.first }
                                         val idx = sel.second
@@ -793,6 +1026,7 @@ fun EditorScreen(
                         coroutineScope {
                             launch {
                                 detectTapGestures { screen ->
+                                    if (suppressDrawing) return@detectTapGestures
                                     when {
                                         editingTextId != null -> commitEditing()
                                         selectedTextId != null -> selectedTextId = null
@@ -839,13 +1073,17 @@ fun EditorScreen(
                             }
                         }
                     }
-                    else -> Modifier.pointerInput(tool, inkColor, thickness, penType) {
+                    else -> Modifier.pointerInput(tool, inkColor, thickness, penType, pageFormat) {
                         detectDragGestures(
                             onDragStart = { screen ->
                                 val layer = activeLayer()
-                                if (layer != null && !layer.locked) {
+                                if (!suppressDrawing && layer != null && !layer.locked) {
                                     val point = toPage(screen)
                                     if (tool == Tool.ERASER) {
+                                        if (eraserBackup == null) {
+                                            eraserBackup =
+                                                layer.id to layer.strokes.toList()
+                                        }
                                         eraseAt(point)
                                     } else if (
                                         point.x in 0f..pageFormat.widthPt &&
@@ -858,7 +1096,7 @@ fun EditorScreen(
                             onDrag = { change, _ ->
                                 change.consume()
                                 val layer = activeLayer()
-                                if (layer != null && !layer.locked) {
+                                if (!suppressDrawing && layer != null && !layer.locked) {
                                     val point = toPage(
                                         change.position,
                                         change.pressure.coerceIn(0.1f, 1f)
@@ -911,7 +1149,9 @@ fun EditorScreen(
                                     undoStack.clear()
                                 }
                                 currentPoints = emptyList()
-                            }
+                                eraserBackup = null
+                            },
+                            onDragCancel = { cancelInProgressGesture() }
                         )
                     }
                 }
@@ -940,11 +1180,19 @@ fun EditorScreen(
                     topLeft = viewOffset,
                     size = sheetSize
                 )
-                // The pattern function bounds itself to the given size,
-                // so passing the sheet size keeps it inside the page.
-                drawPaperPattern(
-                    currentTemplate, viewScale, viewOffset, sheetSize,
-                    PaperTemplates.PT_PER_MM
+                // The part of the page currently on screen, in page
+                // coordinates: the pattern generator draws only inside it.
+                val visiblePageRect = androidx.compose.ui.geometry.Rect(
+                    left = maxOf(0f, -viewOffset.x / viewScale),
+                    top = maxOf(0f, -viewOffset.y / viewScale),
+                    right = minOf(
+                        pageFormat.widthPt,
+                        (size.width - viewOffset.x) / viewScale
+                    ),
+                    bottom = minOf(
+                        pageFormat.heightPt,
+                        (size.height - viewOffset.y) / viewScale
+                    )
                 )
                 withTransform({
                     translate(viewOffset.x, viewOffset.y)
@@ -960,6 +1208,16 @@ fun EditorScreen(
                         )
                     )
                     try {
+                        // Paper template: generated in page coordinates,
+                        // inside the same transform and page clip as the
+                        // ink, so it can never drift from the page or leak
+                        // onto the gray surround.
+                        drawPagePattern(
+                            template = currentTemplate,
+                            pageWidth = pageFormat.widthPt,
+                            pageHeight = pageFormat.heightPt,
+                            visible = visiblePageRect
+                        )
                     for (layer in layersWork) {
                         if (!layer.visible) continue
                         for (stroke in layer.strokes) {
@@ -1087,6 +1345,9 @@ fun EditorScreen(
                                                     // pan/zoom are per-event changes, so
                                                     // apply them to the freshest state.
                                                     detectTransformGestures { _, pan, zoom, _ ->
+                                                        if (suppressDrawing) {
+                                                            return@detectTransformGestures
+                                                        }
                                                         val base = layersWork
                                                             .firstOrNull { it.id == layer.id }
                                                             ?.texts
