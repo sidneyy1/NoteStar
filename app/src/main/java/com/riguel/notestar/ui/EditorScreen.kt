@@ -113,6 +113,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.focus.FocusRequester
@@ -153,6 +154,7 @@ import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PageFormat
 import com.riguel.notestar.data.PageTemplate
 import com.riguel.notestar.data.PageViewState
+import com.riguel.notestar.data.ToolPrefs
 import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
@@ -173,17 +175,6 @@ import kotlin.math.sin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
-private val penColors = listOf(
-    Color.Black, Color(0xFF424242), Color(0xFF1565C0), Color(0xFF039BE5),
-    Color(0xFF00897B), Color(0xFF2E7D32), Color(0xFF7CB342), Color(0xFFEF6C00),
-    Color(0xFFC62828), Color(0xFFAD1457), Color(0xFF6A1B9A), Color(0xFF4E342E)
-)
-
-private val highlighterColors = listOf(
-    Color(0xFFFFEB3B), Color(0xFFCDDC39), Color(0xFF69F0AE), Color(0xFF4DD0E1),
-    Color(0xFF81D4FA), Color(0xFFF48FB1), Color(0xFFFFB74D), Color(0xFFCE93D8)
-)
-
 private fun fontFamilyFor(name: String): FontFamily = when (name) {
     TextFonts.SERIF -> FontFamily.Serif
     TextFonts.SANS -> FontFamily.SansSerif
@@ -198,6 +189,15 @@ private fun fontLabel(name: String): String = when (name) {
     TextFonts.MONO -> "Mono"
     TextFonts.CURSIVE -> "Cursive"
     else -> "Default"
+}
+
+/** Prefs key for a tool's remembered color/size (see ToolPrefs). */
+private fun toolKey(t: Tool, pt: String): String = when (t) {
+    Tool.PEN -> "pen_$pt"
+    Tool.HIGHLIGHTER -> "highlighter"
+    Tool.ERASER -> "eraser"
+    Tool.TEXT -> "text"
+    else -> "pen_pen"
 }
 
 private fun penTypeLabel(name: String): String = when (name) {
@@ -324,46 +324,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPageText(
             element.x + element.paddingPt,
             element.y + element.paddingPt
         )
-    )
-}
-
-private fun colorToHex(c: Color): String = String.format(
-    "#%02X%02X%02X",
-    (c.red * 255).roundToInt(),
-    (c.green * 255).roundToInt(),
-    (c.blue * 255).roundToInt()
-)
-
-private fun parseHexColor(input: String): Color? {
-    val t = input.trim().removePrefix("#")
-    if (t.length != 6) return null
-    val v = t.toLongOrNull(16) ?: return null
-    return Color(0xFF000000.toInt() or v.toInt())
-}
-
-/**
- * A small numeric field for setting a size exactly (type "10" = 10px),
- * for when a slider is fiddly — e.g. a phone in portrait.
- */
-@Composable
-internal fun NumericSizeField(
-    value: Float,
-    onApply: (Float) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var text by remember(value) { mutableStateOf(value.roundToInt().toString()) }
-    OutlinedTextField(
-        value = text,
-        onValueChange = { text = it.filter { c -> c.isDigit() } },
-        singleLine = true,
-        keyboardOptions = KeyboardOptions(
-            keyboardType = KeyboardType.Number,
-            imeAction = ImeAction.Done
-        ),
-        keyboardActions = KeyboardActions(
-            onDone = { text.toFloatOrNull()?.let { onApply(it) } }
-        ),
-        modifier = modifier.width(68.dp)
     )
 }
 
@@ -587,11 +547,65 @@ fun EditorScreen(
         switchPage(pagesState.lastIndex)
     }
 
+    val toolContext = LocalContext.current
     var mode by remember { mutableStateOf(EditorMode.DRAW) }
     var tool by remember { mutableStateOf(Tool.PEN) }
-    var penType by remember { mutableStateOf(PenTypes.PEN) }
-    var inkColor by remember { mutableStateOf(Color.Black) }
-    var thickness by remember { mutableStateOf(3f) }
+    var penType by remember {
+        mutableStateOf(ToolPrefs.penType(toolContext, PenTypes.PEN))
+    }
+    // Tool settings are remembered per tool in ToolPrefs and restored
+    // when switching back (v0.15.0); the old code forced highlighter
+    // to yellow and pen/text to black on every switch instead.
+    var inkColor by remember {
+        mutableStateOf(
+            ToolPrefs.colorForTool(toolContext, "pen_$penType", Color.Black)
+        )
+    }
+    var thickness by remember {
+        mutableStateOf(
+            ToolPrefs.sizeForTool(toolContext, "pen_$penType", 3f)
+        )
+    }
+    var eraserSize by remember {
+        mutableStateOf(ToolPrefs.sizeForTool(toolContext, "eraser", 24f))
+    }
+    var pressureEnabled by remember {
+        mutableStateOf(ToolPrefs.pressureEnabled(toolContext))
+    }
+    // Shared tool options sheet state (v0.15.0).
+    var sheetView by remember { mutableStateOf(ToolSheetView.MAIN) }
+    var sheetEntryView by remember { mutableStateOf(ToolSheetView.MAIN) }
+    var recentColors by remember {
+        mutableStateOf(ToolPrefs.recentColors(toolContext))
+    }
+    var customColors by remember {
+        mutableStateOf(ToolPrefs.customColors(toolContext))
+    }
+    // On-canvas brush ring: shown while the size slider drags, and
+    // for 500ms after release (session guards against a stale hide).
+    var brushRingVisible by remember { mutableStateOf(false) }
+    var brushRingSession by remember { mutableStateOf(0) }
+    LaunchedEffect(inkColor, tool, penType) {
+        ToolPrefs.saveColorForTool(
+            toolContext, toolKey(tool, penType), inkColor
+        )
+    }
+    LaunchedEffect(thickness, tool, penType) {
+        if (tool != Tool.TEXT && tool != Tool.ERASER) {
+            ToolPrefs.saveSizeForTool(
+                toolContext, toolKey(tool, penType), thickness
+            )
+        }
+    }
+    LaunchedEffect(eraserSize) {
+        ToolPrefs.saveSizeForTool(toolContext, "eraser", eraserSize)
+    }
+    LaunchedEffect(penType) {
+        ToolPrefs.savePenType(toolContext, penType)
+    }
+    LaunchedEffect(pressureEnabled) {
+        ToolPrefs.setPressureEnabled(toolContext, pressureEnabled)
+    }
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
 
     // Two-finger page gestures (see the interceptor on the page area):
@@ -645,12 +659,16 @@ fun EditorScreen(
     var showOutline by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
-    var newTextSize by remember { mutableStateOf(10f) }
+    var newTextSize by remember {
+        mutableStateOf(ToolPrefs.sizeForTool(toolContext, "text", 10f))
+    }
+    LaunchedEffect(newTextSize) {
+        ToolPrefs.saveSizeForTool(toolContext, "text", newTextSize)
+    }
     var newTextBold by remember { mutableStateOf(false) }
     var newTextItalic by remember { mutableStateOf(false) }
     var newTextFont by remember { mutableStateOf(TextFonts.DEFAULT) }
     var newTextUnderline by remember { mutableStateOf(false) }
-    var hexInput by remember { mutableStateOf(colorToHex(Color.Black)) }
     val focusRequester = remember { FocusRequester() }
 
     val undoStack = remember { mutableStateListOf<NoteStroke>() }
@@ -712,9 +730,26 @@ fun EditorScreen(
 
     fun applyColor(c: Color) {
         inkColor = c
-        hexInput = colorToHex(c)
-        if (tool == Tool.TEXT) {
-            activeText()?.let { updateText(it.copy(colorValue = c.value)) }
+        // In Draw/Text this recolors the box being edited; in Select
+        // it recolors the selected box (activeText covers both).
+        activeText()?.let { updateText(it.copy(colorValue = c.value)) }
+    }
+
+    /** Restores the tool's last color and size from ToolPrefs. */
+    fun loadToolSettings(t: Tool) {
+        val key = toolKey(t, penType)
+        inkColor = ToolPrefs.colorForTool(
+            toolContext, key,
+            if (t == Tool.HIGHLIGHTER) HighlighterPalette.first()
+            else Color.Black
+        )
+        when (t) {
+            Tool.TEXT -> newTextSize =
+                ToolPrefs.sizeForTool(toolContext, key, 10f)
+            Tool.ERASER -> eraserSize =
+                ToolPrefs.sizeForTool(toolContext, key, 24f)
+            else -> thickness =
+                ToolPrefs.sizeForTool(toolContext, key, 3f)
         }
     }
 
@@ -722,11 +757,7 @@ fun EditorScreen(
         commitEditing()
         tool = newTool
         if (newTool != Tool.TEXT) selectedTextId = null
-        when (newTool) {
-            Tool.HIGHLIGHTER -> if (inkColor !in highlighterColors) applyColor(highlighterColors.first())
-            Tool.PEN, Tool.TEXT -> if (inkColor in highlighterColors) applyColor(Color.Black)
-            else -> Unit
-        }
+        loadToolSettings(newTool)
     }
 
     fun setMode(newMode: EditorMode) {
@@ -748,7 +779,7 @@ fun EditorScreen(
                 hypot(
                     (p.x - point.x).toDouble(),
                     (p.y - point.y).toDouble()
-                ) < 24.0 / pageViewState.scale
+                ) < eraserSize.toDouble() / pageViewState.scale.toDouble()
             }
         }
     }
@@ -1309,7 +1340,7 @@ fun EditorScreen(
                             // selected box.
                         }
                     }
-                    else -> Modifier.pointerInput(tool, inkColor, thickness, penType, pageFormat) {
+                    else -> Modifier.pointerInput(tool, inkColor, thickness, penType, pageFormat, pressureEnabled) {
                         detectDragGestures(
                             onDragStart = { screen ->
                                 val layer = activeLayer()
@@ -1335,7 +1366,11 @@ fun EditorScreen(
                                 if (!suppressDrawing && layer != null && !layer.locked) {
                                     val point = toPage(
                                         change.position,
-                                        change.pressure.coerceIn(0.1f, 1f)
+                                        if (pressureEnabled) {
+                                            change.pressure.coerceIn(0.1f, 1f)
+                                        } else {
+                                            1f
+                                        }
                                     )
                                     if (tool == Tool.ERASER) {
                                         eraseAt(point)
@@ -1549,6 +1584,29 @@ fun EditorScreen(
                         drawContext.canvas.restore()
                     }
                 }
+            }
+
+            // Brush ring (v0.15.0): while the size slider drags (and
+            // 500ms after release), a ring at the center of the canvas
+            // shows the real on-screen brush size at current zoom:
+            // diameter = size (pt) x page scale (px per pt). It has
+            // no input handling, so it never blocks drawing.
+            if (brushRingVisible) {
+                val ringSizePt = when (tool) {
+                    Tool.ERASER -> eraserSize
+                    Tool.TEXT -> activeText()?.fontSizeSp ?: newTextSize
+                    else -> thickness
+                }
+                val ringDiameter = with(LocalDensity.current) {
+                    (ringSizePt * pageViewState.scale).toDp()
+                }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(ringDiameter.coerceAtLeast(8.dp))
+                        .clip(CircleShape)
+                        .border(2.dp, DesignTokens.Accent, CircleShape)
+                )
             }
 
             // Interaction overlay (v0.14.1): this section draws NO
@@ -1810,12 +1868,25 @@ fun EditorScreen(
             // docked at the bottom center of the canvas. The drawing rows
             // that used to sit under the top toolbar live here now.
             if (chromeVisible) {
+                // Every draw tool has sheet content now (eraser
+                // gets its size control), as does Select mode.
                 val popoverHasContent = mode == EditorMode.SELECT ||
-                    (mode == EditorMode.DRAW && tool != Tool.ERASER)
+                    mode == EditorMode.DRAW
+                // Outside-tap scrim: while the sheet is open, a tap
+                // anywhere but the bottom column dismisses it. The
+                // column itself is composed after this, so the sheet
+                // and the toolbar pill stay tappable above it.
+                if (popoverOpen && !toolsCollapsed && popoverHasContent) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clickable { popoverOpen = false }
+                    )
+                }
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     AnimatedVisibility(
@@ -1823,245 +1894,309 @@ fun EditorScreen(
                         enter = fadeIn(tween(180)) + expandVertically(tween(180)),
                         exit = fadeOut(tween(150)) + shrinkVertically(tween(150))
                     ) {
-                        ToolOptionsPopover(modifier = Modifier.fillMaxWidth()) {
-                    // Pen type picker (Pen tool only)
-                    if (mode == EditorMode.DRAW && tool == Tool.PEN) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            PenTypes.ALL.forEach { type ->
-                                FilterChip(
-                                    selected = penType == type,
-                                    onClick = { penType = type },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = DesignTokens.AccentTint,
-                                        selectedLabelColor = DesignTokens.TextPrimary
-                                    ),
-                                    label = { Text(penTypeLabel(type)) }
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                            }
-                        }
-                    }
-                // Rich text formatting bar
-                if (mode == EditorMode.DRAW && tool == Tool.TEXT) {
-                    val target = activeText()
-                    val boldActive = target?.bold ?: newTextBold
-                    val italicActive = target?.italic ?: newTextItalic
-                    val underlineActive = target?.underline ?: newTextUnderline
-                    val fontActive = target?.fontFamilyName ?: newTextFont
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = {
-                                if (target != null) updateText(target.copy(bold = !target.bold))
-                                else newTextBold = !newTextBold
-                            },
-                            modifier = Modifier.background(
-                                if (boldActive) DesignTokens.AccentTint else Color.Transparent,
-                                CircleShape
+                        ToolOptionsSheet(
+                        view = sheetView,
+                        entryView = sheetEntryView,
+                        onViewChange = { sheetView = it },
+                        onDismiss = { popoverOpen = false },
+                        isHighlighter = tool == Tool.HIGHLIGHTER,
+                        showTransparent = false,
+                        showPenTypes = mode == EditorMode.DRAW &&
+                            tool == Tool.PEN,
+                        penType = penType,
+                        onPenTypeChange = { newType ->
+                            penType = newType
+                            thickness = ToolPrefs.sizeForTool(
+                                toolContext, "pen_$newType", 3f
                             )
-                        ) {
-                            Icon(Icons.Filled.FormatBold, contentDescription = "Bold")
-                        }
-                        IconButton(
-                            onClick = {
-                                if (target != null) updateText(target.copy(italic = !target.italic))
-                                else newTextItalic = !newTextItalic
-                            },
-                            modifier = Modifier.background(
-                                if (italicActive) DesignTokens.AccentTint else Color.Transparent,
-                                CircleShape
+                            inkColor = ToolPrefs.colorForTool(
+                                toolContext, "pen_$newType", Color.Black
                             )
-                        ) {
-                            Icon(Icons.Filled.FormatItalic, contentDescription = "Italic")
-                        }
-                        IconButton(
-                            onClick = {
-                                if (target != null) updateText(target.copy(underline = !target.underline))
-                                else newTextUnderline = !newTextUnderline
-                            },
-                            modifier = Modifier.background(
-                                if (underlineActive) DesignTokens.AccentTint else Color.Transparent,
-                                CircleShape
-                            )
-                        ) {
-                            Icon(Icons.Filled.FormatUnderlined, contentDescription = "Underline")
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        TextFonts.ALL.forEach { fontName ->
-                            TextButton(onClick = {
-                                if (target != null) updateText(target.copy(fontFamilyName = fontName))
-                                else newTextFont = fontName
-                            }) {
-                                Text(
-                                    text = fontLabel(fontName),
-                                    fontFamily = fontFamilyFor(fontName),
-                                    fontWeight = if (fontName == fontActive) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (fontName == fontActive) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
-                                    }
-                                )
-                            }
-                        }
-                        if (selectedTextId != null && editingTextId == null) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            IconButton(onClick = {
-                                for (layer in layersWork) {
-                                    layer.texts.removeAll { it.id == selectedTextId }
-                                }
-                                selectedTextId = null
-                            }) {
-                                Icon(Icons.Filled.Delete, contentDescription = "Delete selected text")
-                            }
-                        }
-                    }
-                    if (!compact) {
-                        Text(
-                            text = "Tap the page to type. Existing text is locked — switch to Select to move, resize or edit it. Pinch zooms the page, never the text.",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-                    }
-                }
-                // Palette + size + hex (toggle with the palette button; also
-                // hidden while erasing)
-                if (mode == EditorMode.DRAW && tool != Tool.ERASER) {
-                    val palette = if (tool == Tool.HIGHLIGHTER) highlighterColors else penColors
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                            palette.forEach { c ->
-                                Box(
-                                    modifier = Modifier
-                                        .size(32.dp)
-                                        .clip(CircleShape)
-                                        .background(c)
-                                        .border(
-                                            width = if (c == inkColor) 3.dp else 1.dp,
-                                            color = if (c == inkColor) DesignTokens.Accent else Color.Gray,
-                                            shape = CircleShape
-                                        )
-                                        .clickable { applyColor(c) }
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        val target = activeText()
-                        if (tool == Tool.TEXT) {
-                            Slider(
-                                value = target?.fontSizeSp ?: newTextSize,
-                                onValueChange = { v ->
-                                    if (target != null) updateText(target.copy(fontSizeSp = v))
-                                    else newTextSize = v
-                                },
-                                valueRange = 5f..58f,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            NumericSizeField(
-                                value = target?.fontSizeSp ?: newTextSize,
-                                onApply = { v ->
-                                    val clamped = v.coerceIn(5f, 58f)
+                        },
+                        showSize = mode == EditorMode.DRAW,
+                        size = when (tool) {
+                            Tool.TEXT -> activeText()?.fontSizeSp
+                                ?: newTextSize
+                            Tool.ERASER -> eraserSize
+                            else -> thickness
+                        },
+                        sizeRange = when (tool) {
+                            Tool.TEXT -> 5f..58f
+                            else -> sizeRangeFor(tool, penType)
+                        },
+                        sizeUnit = "pt",
+                        previewKind = when (tool) {
+                            Tool.HIGHLIGHTER -> PreviewKind.HIGHLIGHTER
+                            Tool.TEXT -> PreviewKind.TEXT
+                            else -> PreviewKind.STROKE
+                        },
+                        onSizeChange = { v ->
+                            when (tool) {
+                                Tool.TEXT -> {
+                                    val target = activeText()
                                     if (target != null) {
-                                        updateText(target.copy(fontSizeSp = clamped))
+                                        updateText(
+                                            target.copy(fontSizeSp = v)
+                                        )
                                     } else {
-                                        newTextSize = clamped
+                                        newTextSize = v
                                     }
                                 }
-                            )
-                            Text("pt", style = MaterialTheme.typography.bodySmall)
-                        } else {
-                            Slider(
-                                value = thickness,
-                                onValueChange = { thickness = it },
-                                valueRange = 0.5f..29f,
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            NumericSizeField(
-                                value = thickness,
-                                onApply = { v -> thickness = v.coerceIn(0.5f, 29f) }
-                            )
-                            Text("pt", style = MaterialTheme.typography.bodySmall)
+                                Tool.ERASER -> eraserSize = v
+                                else -> thickness = v
+                            }
+                        },
+                        onSizeDragStart = {
+                            brushRingSession++
+                            brushRingVisible = true
+                        },
+                        onSizeDragEnd = {
+                            val session = brushRingSession
+                            editorScope.launch {
+                                delay(500)
+                                if (session == brushRingSession) {
+                                    brushRingVisible = false
+                                }
+                            }
+                        },
+                        showColorRow = mode == EditorMode.DRAW &&
+                            tool != Tool.ERASER,
+                        inkColor = inkColor,
+                        onColorLive = { applyColor(it) },
+                        onColorCommit = { c ->
+                            applyColor(c)
+                            ToolPrefs.pushRecent(toolContext, c)
+                            recentColors =
+                                ToolPrefs.recentColors(toolContext)
+                        },
+                        recentColors = recentColors,
+                        customColors = customColors,
+                        onSaveCustom = { c ->
+                            ToolPrefs.addCustom(toolContext, c)
+                            customColors =
+                                ToolPrefs.customColors(toolContext)
+                        },
+                        onDeleteCustom = { c ->
+                            ToolPrefs.removeCustom(toolContext, c)
+                            customColors =
+                                ToolPrefs.customColors(toolContext)
+                        },
+                        selectColorMode = mode == EditorMode.SELECT &&
+                            selectedTextId != null,
+                        showPressureToggle = mode == EditorMode.DRAW,
+                        pressureEnabled = pressureEnabled,
+                        onPressureChange = { pressureEnabled = it },
+                        extraTopContent = {
+                            // Rich text formatting bar (unchanged).
+                            if (mode == EditorMode.DRAW &&
+                                tool == Tool.TEXT
+                            ) {
+                                val target = activeText()
+                                val boldActive = target?.bold ?: newTextBold
+                                val italicActive = target?.italic
+                                    ?: newTextItalic
+                                val underlineActive = target?.underline
+                                    ?: newTextUnderline
+                                val fontActive = target?.fontFamilyName
+                                    ?: newTextFont
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(
+                                            rememberScrollState()
+                                        )
+                                        .padding(horizontal = 4.dp),
+                                    verticalAlignment =
+                                        Alignment.CenterVertically
+                                ) {
+                                    IconButton(
+                                        onClick = {
+                                            if (target != null) {
+                                                updateText(
+                                                    target.copy(
+                                                        bold = !target.bold
+                                                    )
+                                                )
+                                            } else {
+                                                newTextBold = !newTextBold
+                                            }
+                                        },
+                                        modifier = Modifier.background(
+                                            if (boldActive) {
+                                                DesignTokens.AccentTint
+                                            } else {
+                                                Color.Transparent
+                                            },
+                                            CircleShape
+                                        )
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.FormatBold,
+                                            contentDescription = "Bold"
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            if (target != null) {
+                                                updateText(
+                                                    target.copy(
+                                                        italic = !target.italic
+                                                    )
+                                                )
+                                            } else {
+                                                newTextItalic = !newTextItalic
+                                            }
+                                        },
+                                        modifier = Modifier.background(
+                                            if (italicActive) {
+                                                DesignTokens.AccentTint
+                                            } else {
+                                                Color.Transparent
+                                            },
+                                            CircleShape
+                                        )
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.FormatItalic,
+                                            contentDescription = "Italic"
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            if (target != null) {
+                                                updateText(
+                                                    target.copy(
+                                                        underline =
+                                                            !target.underline
+                                                    )
+                                                )
+                                            } else {
+                                                newTextUnderline =
+                                                    !newTextUnderline
+                                            }
+                                        },
+                                        modifier = Modifier.background(
+                                            if (underlineActive) {
+                                                DesignTokens.AccentTint
+                                            } else {
+                                                Color.Transparent
+                                            },
+                                            CircleShape
+                                        )
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.FormatUnderlined,
+                                            contentDescription = "Underline"
+                                        )
+                                    }
+                                    Spacer(
+                                        modifier = Modifier.width(8.dp)
+                                    )
+                                    TextFonts.ALL.forEach { fontName ->
+                                        TextButton(onClick = {
+                                            if (target != null) {
+                                                updateText(
+                                                    target.copy(
+                                                        fontFamilyName =
+                                                            fontName
+                                                    )
+                                                )
+                                            } else {
+                                                newTextFont = fontName
+                                            }
+                                        }) {
+                                            Text(
+                                                text = fontLabel(fontName),
+                                                fontFamily = fontFamilyFor(
+                                                    fontName
+                                                ),
+                                                fontWeight = if (fontName ==
+                                                    fontActive
+                                                ) {
+                                                    FontWeight.Bold
+                                                } else {
+                                                    FontWeight.Normal
+                                                },
+                                                color = if (fontName ==
+                                                    fontActive
+                                                ) {
+                                                    MaterialTheme.colorScheme
+                                                        .primary
+                                                } else {
+                                                    MaterialTheme.colorScheme
+                                                        .onSurface
+                                                }
+                                            )
+                                        }
+                                    }
+                                    if (selectedTextId != null &&
+                                        editingTextId == null
+                                    ) {
+                                        Spacer(
+                                            modifier = Modifier.width(8.dp)
+                                        )
+                                        IconButton(onClick = {
+                                            for (layer in layersWork) {
+                                                layer.texts.removeAll {
+                                                    it.id == selectedTextId
+                                                }
+                                            }
+                                            selectedTextId = null
+                                        }) {
+                                            Icon(
+                                                Icons.Filled.Delete,
+                                                contentDescription =
+                                                    "Delete selected text"
+                                            )
+                                        }
+                                    }
+                                }
+                                if (!compact) {
+                                    Text(
+                                        text = "Tap the page to type. Existing text is locked — switch to Select to move, resize or edit it. Pinch zooms the page, never the text.",
+                                        style = MaterialTheme.typography
+                                            .bodySmall,
+                                        modifier = Modifier.padding(
+                                            horizontal = 12.dp
+                                        )
+                                    )
+                                }
+                            }
+                            // Select mode actions (unchanged).
+                            if (mode == EditorMode.SELECT) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(
+                                            horizontal = 8.dp,
+                                            vertical = 2.dp
+                                        ),
+                                    verticalAlignment =
+                                        Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Tap ink or text to select it. Drag a selected text box by its top handle, resize with a corner handle; drag selected ink to move it.",
+                                        style = MaterialTheme.typography
+                                            .bodySmall,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = { deleteSelected() },
+                                        modifier = Modifier.size(btnSize),
+                                        enabled = selectedStroke != null ||
+                                            selectedTextId != null
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            contentDescription =
+                                                "Delete selection",
+                                            modifier = Modifier.size(iconSize)
+                                        )
+                                    }
+                                }
+                            }
                         }
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(inkColor)
-                                .border(1.dp, Color.Gray, RoundedCornerShape(6.dp))
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        OutlinedTextField(
-                            value = hexInput,
-                            onValueChange = { hexInput = it },
-                            placeholder = { Text("#RRGGBB") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(
-                                onDone = { parseHexColor(hexInput)?.let { applyColor(it) } }
-                            ),
-                            modifier = Modifier.width(150.dp)
-                        )
-                        IconButton(onClick = {
-                            parseHexColor(hexInput)?.let { applyColor(it) }
-                        }) {
-                            Icon(Icons.Filled.Check, contentDescription = "Apply hex color")
-                        }
-                        Text(text = "Hex color", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                // Select mode actions
-                if (mode == EditorMode.SELECT) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Tap ink or text to select it. Drag a selected text box by its top handle, resize with a corner handle; drag selected ink to move it.",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(
-                            onClick = { deleteSelected() },
-                            modifier = Modifier.size(btnSize),
-                            enabled = selectedStroke != null || selectedTextId != null
-                        ) {
-                            Icon(
-                                Icons.Filled.Delete,
-                                contentDescription = "Delete selection",
-                                modifier = Modifier.size(iconSize)
-                            )
-                        }
-                    }
-                }
-                        }
+                    )
                     }
                     if (popoverOpen && !toolsCollapsed && popoverHasContent) {
                         Spacer(modifier = Modifier.height(8.dp))
@@ -2071,7 +2206,27 @@ fun EditorScreen(
                             mode = mode,
                             onModeTap = { m ->
                                 if (m == mode) {
-                                    if (m != EditorMode.HAND) popoverOpen = !popoverOpen
+                                    if (m != EditorMode.HAND) {
+                                        if (!popoverOpen) {
+                                            // Select with a text box
+                                            // selected opens straight
+                                            // on its colors; else MAIN.
+                                            if (m == EditorMode.SELECT &&
+                                                selectedTextId != null
+                                            ) {
+                                                sheetView =
+                                                    ToolSheetView.COLOR
+                                                sheetEntryView =
+                                                    ToolSheetView.COLOR
+                                            } else {
+                                                sheetView =
+                                                    ToolSheetView.MAIN
+                                                sheetEntryView =
+                                                    ToolSheetView.MAIN
+                                            }
+                                        }
+                                        popoverOpen = !popoverOpen
+                                    }
                                 } else {
                                     setMode(m)
                                     popoverOpen = false
@@ -2080,6 +2235,10 @@ fun EditorScreen(
                             tool = tool,
                             onToolTap = { t ->
                                 if (mode == EditorMode.DRAW && t == tool) {
+                                    if (!popoverOpen) {
+                                        sheetView = ToolSheetView.MAIN
+                                        sheetEntryView = ToolSheetView.MAIN
+                                    }
                                     popoverOpen = !popoverOpen
                                 } else {
                                     if (mode != EditorMode.DRAW) setMode(EditorMode.DRAW)
@@ -2092,7 +2251,15 @@ fun EditorScreen(
                             onColorTap = {
                                 if (mode != EditorMode.DRAW) setMode(EditorMode.DRAW)
                                 if (tool == Tool.ERASER) selectTool(Tool.PEN)
-                                popoverOpen = !popoverOpen
+                                // The color button always shows the
+                                // swatch grid: opening goes to COLOR,
+                                // and tapping it while open switches
+                                // there instead of closing.
+                                sheetView = ToolSheetView.COLOR
+                                if (!popoverOpen) {
+                                    sheetEntryView = ToolSheetView.COLOR
+                                }
+                                popoverOpen = true
                             },
                             onUndo = {
                                 val layer = activeLayer()
@@ -2142,8 +2309,10 @@ fun EditorScreen(
                         )
                     }
                 }
-                // Page navigation pill: bottom right, fades when idle.
-                Box(
+                // Page navigation pill: bottom right, fades when idle,
+                // and hidden entirely while the sheet is open so
+                // nothing overlaps it.
+                if (!(popoverOpen && !toolsCollapsed)) Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(end = 12.dp, bottom = 64.dp)
