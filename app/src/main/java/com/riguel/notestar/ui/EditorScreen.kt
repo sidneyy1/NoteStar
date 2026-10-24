@@ -1,4 +1,15 @@
 package com.riguel.notestar.ui
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.ui.draw.alpha
+import kotlinx.coroutines.delay
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -320,7 +331,19 @@ fun EditorScreen(
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
     var beautifyOn by remember { mutableStateOf(false) }
     var chromeVisible by remember { mutableStateOf(true) }
-    var paletteVisible by remember { mutableStateOf(!compact) }
+    var popoverOpen by remember { mutableStateOf(false) }
+    var toolsCollapsed by remember { mutableStateOf(false) }
+    var pagePillFaded by remember { mutableStateOf(false) }
+    LaunchedEffect(currentPageIndex, pagesState.size) {
+        pagePillFaded = false
+        delay(2000)
+        pagePillFaded = true
+    }
+    val pagePillAlpha by animateFloatAsState(
+        targetValue = if (pagePillFaded) 0.25f else 1f,
+        animationSpec = tween(300),
+        label = "pagePillAlpha"
+    )
     var showLayers by remember { mutableStateOf(false) }
     var showOutline by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
@@ -518,447 +541,12 @@ fun EditorScreen(
                     commitEditing()
                     onSave(buildDocument())
                 },
-                onEnterPip = onEnterPip
+                onEnterPip = onEnterPip,
+                onExcerpt = {
+                    commitEditing()
+                    onExcerptPage(title.ifBlank { "Untitled" }, snapshotCurrentPage())
+                }
             )
-
-            // Mode row: Select / Hand / Draw
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val modes = listOf(
-                    Triple(EditorMode.SELECT, Icons.Filled.NearMe, "Select"),
-                    Triple(EditorMode.HAND, Icons.Filled.PanTool, "Hand"),
-                    Triple(EditorMode.DRAW, Icons.Filled.Brush, "Draw")
-                )
-                modes.forEach { (m, icon, label) ->
-                    Row(
-                        modifier = Modifier
-                            .background(
-                                if (m == mode) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    Color.Transparent
-                                },
-                                RoundedCornerShape(50)
-                            )
-                            .clickable { setMode(m) }
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(icon, contentDescription = label, modifier = Modifier.size(iconSize))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = label, style = MaterialTheme.typography.labelLarge)
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-            }
-
-            // Draw sub-tools
-            if (mode == EditorMode.DRAW) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val toolIcons = listOf(
-                        Triple(Tool.PEN, Icons.Filled.Gesture, "Pen"),
-                        Triple(Tool.HIGHLIGHTER, Icons.Filled.FormatColorFill, "Highlighter"),
-                        Triple(Tool.TEXT, Icons.Filled.TextFields, "Text"),
-                        Triple(Tool.ERASER, Icons.Filled.Backspace, "Eraser")
-                    )
-                    toolIcons.forEach { (t, icon, description) ->
-                        IconButton(
-                            onClick = { selectTool(t) },
-                            modifier = Modifier
-                                .size(btnSize)
-                                .background(
-                                    if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                                    CircleShape
-                                )
-                        ) {
-                            Icon(
-                                icon,
-                                contentDescription = description,
-                                modifier = Modifier.size(iconSize)
-                            )
-                        }
-                    }
-                    IconButton(
-                        onClick = { beautifyOn = !beautifyOn },
-                        modifier = Modifier
-                            .size(btnSize)
-                            .background(
-                                if (beautifyOn) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                                CircleShape
-                            )
-                    ) {
-                        Icon(
-                            Icons.Filled.AutoFixHigh,
-                            contentDescription = "Handwriting beautifier",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    IconButton(
-                        onClick = { paletteVisible = !paletteVisible },
-                        modifier = Modifier
-                            .size(btnSize)
-                            .background(
-                                if (paletteVisible) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                                CircleShape
-                            )
-                    ) {
-                        Icon(
-                            Icons.Filled.Palette,
-                            contentDescription = "Show / hide colors",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    IconButton(
-                        modifier = Modifier.size(btnSize),
-                        onClick = {
-                            val layer = activeLayer()
-                            if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
-                                redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
-                            }
-                        }
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Undo,
-                            contentDescription = "Undo",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    IconButton(
-                        modifier = Modifier.size(btnSize),
-                        onClick = {
-                            val layer = activeLayer()
-                            if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
-                                layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
-                            }
-                        }
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Redo,
-                            contentDescription = "Redo",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    IconButton(
-                        modifier = Modifier.size(btnSize),
-                        onClick = {
-                            val layer = activeLayer()
-                            if (layer != null && !layer.locked) {
-                                layer.strokes.clear()
-                                redoStack.clear()
-                            }
-                        }
-                    ) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "Clear ink on layer",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                }
-
-                // Pen type picker (Pen tool only)
-                if (tool == Tool.PEN) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 8.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        PenTypes.ALL.forEach { type ->
-                            FilterChip(
-                                selected = penType == type,
-                                onClick = { penType = type },
-                                label = { Text(penTypeLabel(type)) }
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                        }
-                    }
-                }
-            }
-
-            // Select mode actions
-            if (mode == EditorMode.SELECT) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Tap ink or text to select it, then drag to move it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(
-                        onClick = { deleteSelected() },
-                        modifier = Modifier.size(btnSize),
-                        enabled = selectedStroke != null || selectedTextId != null
-                    ) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "Delete selection",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                }
-            }
-
-            // Page bar: layers, outline, excerpt, page navigation
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { showLayers = true }, modifier = Modifier.size(btnSize)) {
-                    Icon(
-                        Icons.Filled.Layers,
-                        contentDescription = "Layers",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                IconButton(onClick = { showOutline = true }, modifier = Modifier.size(btnSize)) {
-                    Icon(
-                        Icons.Filled.FormatListBulleted,
-                        contentDescription = "Outline",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                IconButton(
-                    onClick = {
-                        commitEditing()
-                        onExcerptPage(title.ifBlank { "Untitled" }, snapshotCurrentPage())
-                    },
-                    modifier = Modifier.size(btnSize)
-                ) {
-                    Icon(
-                        Icons.Filled.ContentCut,
-                        contentDescription = "Excerpt page into new note",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                Spacer(modifier = Modifier.weight(1f))
-                IconButton(
-                    onClick = { switchPage(currentPageIndex - 1) },
-                    modifier = Modifier.size(btnSize)
-                ) {
-                    Icon(
-                        Icons.Filled.KeyboardArrowLeft,
-                        contentDescription = "Previous page",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                Text("Page ${currentPageIndex + 1} / ${pagesState.size}")
-                IconButton(
-                    onClick = { switchPage(currentPageIndex + 1) },
-                    modifier = Modifier.size(btnSize)
-                ) {
-                    Icon(
-                        Icons.Filled.KeyboardArrowRight,
-                        contentDescription = "Next page",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                IconButton(
-                    onClick = { addPage() },
-                    modifier = Modifier.size(btnSize)
-                ) {
-                    Icon(
-                        Icons.Filled.Add,
-                        contentDescription = "Add page",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-            }
-
-            // Rich text formatting bar
-            if (mode == EditorMode.DRAW && tool == Tool.TEXT) {
-                val target = activeText()
-                val boldActive = target?.bold ?: newTextBold
-                val italicActive = target?.italic ?: newTextItalic
-                val fontActive = target?.fontFamilyName ?: newTextFont
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = {
-                            if (target != null) updateText(target.copy(bold = !target.bold))
-                            else newTextBold = !newTextBold
-                        },
-                        modifier = Modifier.background(
-                            if (boldActive) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                            CircleShape
-                        )
-                    ) {
-                        Icon(Icons.Filled.FormatBold, contentDescription = "Bold")
-                    }
-                    IconButton(
-                        onClick = {
-                            if (target != null) updateText(target.copy(italic = !target.italic))
-                            else newTextItalic = !newTextItalic
-                        },
-                        modifier = Modifier.background(
-                            if (italicActive) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                            CircleShape
-                        )
-                    ) {
-                        Icon(Icons.Filled.FormatItalic, contentDescription = "Italic")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    TextFonts.ALL.forEach { fontName ->
-                        TextButton(onClick = {
-                            if (target != null) updateText(target.copy(fontFamilyName = fontName))
-                            else newTextFont = fontName
-                        }) {
-                            Text(
-                                text = fontLabel(fontName),
-                                fontFamily = fontFamilyFor(fontName),
-                                fontWeight = if (fontName == fontActive) FontWeight.Bold else FontWeight.Normal,
-                                color = if (fontName == fontActive) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                }
-                            )
-                        }
-                    }
-                    if (selectedTextId != null && editingTextId == null) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        IconButton(onClick = {
-                            for (layer in layersWork) {
-                                layer.texts.removeAll { it.id == selectedTextId }
-                            }
-                            selectedTextId = null
-                        }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Delete selected text")
-                        }
-                    }
-                }
-                if (!compact) {
-                    Text(
-                        text = "Tap the page to type. Tap text to select, tap again to edit. Pinch to resize it, or pinch the page to zoom a selected text.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-                }
-            }
-
-            // Palette + size + hex (toggle with the palette button; also
-            // hidden while erasing)
-            if (mode == EditorMode.DRAW && paletteVisible && tool != Tool.ERASER) {
-                val palette = if (tool == Tool.HIGHLIGHTER) highlighterColors else penColors
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                        palette.forEach { c ->
-                            Box(
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(CircleShape)
-                                    .background(c)
-                                    .border(
-                                        width = if (c == inkColor) 3.dp else 1.dp,
-                                        color = if (c == inkColor) Color(0xFFFFC107) else Color.Gray,
-                                        shape = CircleShape
-                                    )
-                                    .clickable { applyColor(c) }
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                        }
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    val target = activeText()
-                    if (tool == Tool.TEXT) {
-                        Slider(
-                            value = target?.fontSizeSp ?: newTextSize,
-                            onValueChange = { v ->
-                                if (target != null) updateText(target.copy(fontSizeSp = v))
-                                else newTextSize = v
-                            },
-                            valueRange = 10f..120f,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        NumericSizeField(
-                            value = target?.fontSizeSp ?: newTextSize,
-                            onApply = { v ->
-                                val clamped = v.coerceIn(10f, 120f)
-                                if (target != null) {
-                                    updateText(target.copy(fontSizeSp = clamped))
-                                } else {
-                                    newTextSize = clamped
-                                }
-                            }
-                        )
-                        Text("px", style = MaterialTheme.typography.bodySmall)
-                    } else {
-                        Slider(
-                            value = thickness,
-                            onValueChange = { thickness = it },
-                            valueRange = 1f..60f,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        NumericSizeField(
-                            value = thickness,
-                            onApply = { v -> thickness = v.coerceIn(1f, 60f) }
-                        )
-                        Text("px", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(inkColor)
-                            .border(1.dp, Color.Gray, RoundedCornerShape(6.dp))
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    OutlinedTextField(
-                        value = hexInput,
-                        onValueChange = { hexInput = it },
-                        placeholder = { Text("#RRGGBB") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(
-                            onDone = { parseHexColor(hexInput)?.let { applyColor(it) } }
-                        ),
-                        modifier = Modifier.width(150.dp)
-                    )
-                    IconButton(onClick = {
-                        parseHexColor(hexInput)?.let { applyColor(it) }
-                    }) {
-                        Icon(Icons.Filled.Check, contentDescription = "Apply hex color")
-                    }
-                    Text(text = "Hex color", style = MaterialTheme.typography.bodySmall)
-                }
-            }
 
             val layerNow = activeLayer()
             if (layerNow != null && layerNow.locked) {
@@ -1184,7 +772,7 @@ fun EditorScreen(
                     .fillMaxSize()
                     .then(gestureModifier)
             ) {
-                drawTemplate(currentTemplate, viewScale, viewOffset, size)
+                drawPaperPattern(currentTemplate, viewScale, viewOffset, size)
                 withTransform({
                     translate(viewOffset.x, viewOffset.y)
                     scale(viewScale, viewScale, Offset.Zero)
@@ -1338,7 +926,7 @@ fun EditorScreen(
             IconButton(
                 onClick = { chromeVisible = !chromeVisible },
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
+                    .align(Alignment.TopEnd)
                     .padding(8.dp)
                     .background(
                         MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
@@ -1349,6 +937,344 @@ fun EditorScreen(
                     if (chromeVisible) Icons.Filled.Fullscreen else Icons.Filled.FullscreenExit,
                     contentDescription = "Toggle full screen"
                 )
+            }
+            // Floating tools (redesign): options popover + toolbar pill,
+            // docked at the bottom center of the canvas. The drawing rows
+            // that used to sit under the top toolbar live here now.
+            if (chromeVisible) {
+                val popoverHasContent = mode == EditorMode.SELECT ||
+                    (mode == EditorMode.DRAW && tool != Tool.ERASER)
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    AnimatedVisibility(
+                        visible = popoverOpen && !toolsCollapsed && popoverHasContent,
+                        enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+                        exit = fadeOut(tween(150)) + shrinkVertically(tween(150))
+                    ) {
+                        ToolOptionsPopover(modifier = Modifier.fillMaxWidth()) {
+                    // Pen type picker (Pen tool only)
+                    if (mode == EditorMode.DRAW && tool == Tool.PEN) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            PenTypes.ALL.forEach { type ->
+                                FilterChip(
+                                    selected = penType == type,
+                                    onClick = { penType = type },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = DesignTokens.AccentTint,
+                                        selectedLabelColor = DesignTokens.TextPrimary
+                                    ),
+                                    label = { Text(penTypeLabel(type)) }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                        }
+                    }
+                // Rich text formatting bar
+                if (mode == EditorMode.DRAW && tool == Tool.TEXT) {
+                    val target = activeText()
+                    val boldActive = target?.bold ?: newTextBold
+                    val italicActive = target?.italic ?: newTextItalic
+                    val fontActive = target?.fontFamilyName ?: newTextFont
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = {
+                                if (target != null) updateText(target.copy(bold = !target.bold))
+                                else newTextBold = !newTextBold
+                            },
+                            modifier = Modifier.background(
+                                if (boldActive) DesignTokens.AccentTint else Color.Transparent,
+                                CircleShape
+                            )
+                        ) {
+                            Icon(Icons.Filled.FormatBold, contentDescription = "Bold")
+                        }
+                        IconButton(
+                            onClick = {
+                                if (target != null) updateText(target.copy(italic = !target.italic))
+                                else newTextItalic = !newTextItalic
+                            },
+                            modifier = Modifier.background(
+                                if (italicActive) DesignTokens.AccentTint else Color.Transparent,
+                                CircleShape
+                            )
+                        ) {
+                            Icon(Icons.Filled.FormatItalic, contentDescription = "Italic")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextFonts.ALL.forEach { fontName ->
+                            TextButton(onClick = {
+                                if (target != null) updateText(target.copy(fontFamilyName = fontName))
+                                else newTextFont = fontName
+                            }) {
+                                Text(
+                                    text = fontLabel(fontName),
+                                    fontFamily = fontFamilyFor(fontName),
+                                    fontWeight = if (fontName == fontActive) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (fontName == fontActive) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    }
+                                )
+                            }
+                        }
+                        if (selectedTextId != null && editingTextId == null) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            IconButton(onClick = {
+                                for (layer in layersWork) {
+                                    layer.texts.removeAll { it.id == selectedTextId }
+                                }
+                                selectedTextId = null
+                            }) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete selected text")
+                            }
+                        }
+                    }
+                    if (!compact) {
+                        Text(
+                            text = "Tap the page to type. Tap text to select, tap again to edit. Pinch to resize it, or pinch the page to zoom a selected text.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 12.dp)
+                        )
+                    }
+                }
+                // Palette + size + hex (toggle with the palette button; also
+                // hidden while erasing)
+                if (mode == EditorMode.DRAW && tool != Tool.ERASER) {
+                    val palette = if (tool == Tool.HIGHLIGHTER) highlighterColors else penColors
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                            palette.forEach { c ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(CircleShape)
+                                        .background(c)
+                                        .border(
+                                            width = if (c == inkColor) 3.dp else 1.dp,
+                                            color = if (c == inkColor) DesignTokens.Accent else Color.Gray,
+                                            shape = CircleShape
+                                        )
+                                        .clickable { applyColor(c) }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        val target = activeText()
+                        if (tool == Tool.TEXT) {
+                            Slider(
+                                value = target?.fontSizeSp ?: newTextSize,
+                                onValueChange = { v ->
+                                    if (target != null) updateText(target.copy(fontSizeSp = v))
+                                    else newTextSize = v
+                                },
+                                valueRange = 10f..120f,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            NumericSizeField(
+                                value = target?.fontSizeSp ?: newTextSize,
+                                onApply = { v ->
+                                    val clamped = v.coerceIn(10f, 120f)
+                                    if (target != null) {
+                                        updateText(target.copy(fontSizeSp = clamped))
+                                    } else {
+                                        newTextSize = clamped
+                                    }
+                                }
+                            )
+                            Text("px", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            Slider(
+                                value = thickness,
+                                onValueChange = { thickness = it },
+                                valueRange = 1f..60f,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            NumericSizeField(
+                                value = thickness,
+                                onApply = { v -> thickness = v.coerceIn(1f, 60f) }
+                            )
+                            Text("px", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(inkColor)
+                                .border(1.dp, Color.Gray, RoundedCornerShape(6.dp))
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedTextField(
+                            value = hexInput,
+                            onValueChange = { hexInput = it },
+                            placeholder = { Text("#RRGGBB") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = { parseHexColor(hexInput)?.let { applyColor(it) } }
+                            ),
+                            modifier = Modifier.width(150.dp)
+                        )
+                        IconButton(onClick = {
+                            parseHexColor(hexInput)?.let { applyColor(it) }
+                        }) {
+                            Icon(Icons.Filled.Check, contentDescription = "Apply hex color")
+                        }
+                        Text(text = "Hex color", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                // Select mode actions
+                if (mode == EditorMode.SELECT) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Tap ink or text to select it, then drag to move it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { deleteSelected() },
+                            modifier = Modifier.size(btnSize),
+                            enabled = selectedStroke != null || selectedTextId != null
+                        ) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Delete selection",
+                                modifier = Modifier.size(iconSize)
+                            )
+                        }
+                    }
+                }
+                        }
+                    }
+                    if (popoverOpen && !toolsCollapsed && popoverHasContent) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    if (!toolsCollapsed) {
+                        FloatingToolbar(
+                            mode = mode,
+                            onModeTap = { m ->
+                                if (m == mode) {
+                                    if (m != EditorMode.HAND) popoverOpen = !popoverOpen
+                                } else {
+                                    setMode(m)
+                                    popoverOpen = false
+                                }
+                            },
+                            tool = tool,
+                            onToolTap = { t ->
+                                if (mode == EditorMode.DRAW && t == tool) {
+                                    popoverOpen = !popoverOpen
+                                } else {
+                                    if (mode != EditorMode.DRAW) setMode(EditorMode.DRAW)
+                                    selectTool(t)
+                                }
+                            },
+                            magicActive = beautifyOn,
+                            onMagicTap = { beautifyOn = !beautifyOn },
+                            inkColor = inkColor,
+                            onColorTap = {
+                                if (mode != EditorMode.DRAW) setMode(EditorMode.DRAW)
+                                if (tool == Tool.ERASER) selectTool(Tool.PEN)
+                                popoverOpen = !popoverOpen
+                            },
+                            onUndo = {
+                                val layer = activeLayer()
+                                if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
+                                    redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
+                                }
+                            },
+                            onRedo = {
+                                val layer = activeLayer()
+                                if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
+                                    layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
+                                }
+                            },
+                            onDelete = {
+                                if (selectedStroke != null || selectedTextId != null) {
+                                    deleteSelected()
+                                } else {
+                                    val layer = activeLayer()
+                                    if (layer != null && !layer.locked) {
+                                        layer.strokes.clear()
+                                        redoStack.clear()
+                                    }
+                                }
+                            },
+                            deleteEnabled = selectedStroke != null || selectedTextId != null ||
+                                (activeLayer()?.strokes?.isNotEmpty() == true),
+                            onCollapse = {
+                                toolsCollapsed = true
+                                popoverOpen = false
+                            }
+                        )
+                    }
+                }
+                if (toolsCollapsed) {
+                    IconButton(
+                        onClick = { toolsCollapsed = false },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp)
+                            .background(Color.White, CircleShape)
+                            .border(1.dp, DesignTokens.Divider, CircleShape)
+                    ) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowUp,
+                            contentDescription = "Show toolbar",
+                            tint = DesignTokens.IconGray
+                        )
+                    }
+                }
+                // Page navigation pill: bottom right, fades when idle.
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = 64.dp)
+                        .alpha(pagePillAlpha)
+                ) {
+                    PageIndicatorPill(
+                        label = "Page ${currentPageIndex + 1} / ${pagesState.size}",
+                        onPrev = { switchPage(currentPageIndex - 1) },
+                        onNext = { switchPage(currentPageIndex + 1) },
+                        onAdd = { addPage() }
+                    )
+                }
             }
         }
     }
@@ -1491,7 +1417,7 @@ private fun LayersDialog(
                             .fillMaxWidth()
                             .background(
                                 if (layer.id == activeLayerId) {
-                                    MaterialTheme.colorScheme.primaryContainer
+                                    DesignTokens.AccentTint
                                 } else {
                                     Color.Transparent
                                 },
@@ -1620,91 +1546,5 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawStrokeSmooth(s
             strokeWidth = width.coerceAtLeast(0.5f),
             cap = StrokeCap.Round
         )
-    }
-}
-
-/** Draw the page template in screen space, following the pan/zoom transform. */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawTemplate(
-    template: PageTemplate,
-    scale: Float,
-    offset: Offset,
-    size: androidx.compose.ui.geometry.Size
-) {
-    if (template == PageTemplate.BLANK) return
-    val left = -offset.x / scale
-    val top = -offset.y / scale
-    val right = left + size.width / scale
-    val bottom = top + size.height / scale
-
-    fun hLine(pageY: Float, color: Color, fromX: Float = left, toX: Float = right) {
-        val y = pageY * scale + offset.y
-        drawLine(
-            color = color,
-            start = Offset(fromX * scale + offset.x, y),
-            end = Offset(toX * scale + offset.x, y),
-            strokeWidth = 2f
-        )
-    }
-
-    fun vLine(pageX: Float, color: Color) {
-        val x = pageX * scale + offset.x
-        drawLine(
-            color = color,
-            start = Offset(x, top * scale + offset.y),
-            end = Offset(x, bottom * scale + offset.y),
-            strokeWidth = 2f
-        )
-    }
-
-    val lineColor = Color(0xFFBBDEFB)
-    when (template) {
-        PageTemplate.LINED, PageTemplate.PLANNER, PageTemplate.LECTURE -> {
-            val startY = if (template == PageTemplate.LECTURE) 168f else 72f
-            var y = floor((top - startY) / 72f) * 72f + startY
-            if (y < startY) y = startY
-            while (y <= bottom) {
-                if (y >= startY) hLine(y, lineColor)
-                y += 72f
-            }
-            vLine(72f, Color(0xFFF8BBD0))
-            if (template == PageTemplate.PLANNER) {
-                // Time column + checkboxes down the left side
-                vLine(150f, lineColor)
-                var cy = startY
-                while (cy <= bottom) {
-                    val topPx = (cy - 56f) * scale + offset.y
-                    drawRect(
-                        color = Color(0xFF90CAF9),
-                        topLeft = Offset(92f * scale + offset.x, topPx),
-                        size = androidx.compose.ui.geometry.Size(22f * scale, 22f * scale),
-                        style = Stroke(width = 2f)
-                    )
-                    cy += 72f
-                }
-            }
-            if (template == PageTemplate.LECTURE) {
-                // Title / date header lines
-                hLine(64f, Color(0xFF90CAF9), fromX = 40f)
-                hLine(120f, Color(0xFF90CAF9), fromX = 40f)
-            }
-        }
-        PageTemplate.DOTTED -> {
-            // Mind-map friendly dot grid
-            val step = 48f
-            var gx = floor(left / step) * step
-            while (gx <= right) {
-                var gy = floor(top / step) * step
-                while (gy <= bottom) {
-                    drawCircle(
-                        color = Color(0xFFB0BEC5),
-                        radius = 2.5f,
-                        center = Offset(gx * scale + offset.x, gy * scale + offset.y)
-                    )
-                    gy += step
-                }
-                gx += step
-            }
-        }
-        PageTemplate.BLANK -> Unit
     }
 }
