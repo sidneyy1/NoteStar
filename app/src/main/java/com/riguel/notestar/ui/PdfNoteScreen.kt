@@ -3,6 +3,7 @@ package com.riguel.notestar.ui
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -34,6 +35,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Backspace
 import androidx.compose.material.icons.filled.Check
@@ -141,6 +143,7 @@ fun PdfNoteScreen(
     // Working copy of the current PDF page's annotation layer.
     val strokes = remember { mutableStateListOf<NoteStroke>() }
     val texts = remember { mutableStateListOf<TextElement>() }
+    val redoStrokes = remember { mutableStateListOf<NoteStroke>() }
 
     fun workPageIndex(): Int =
         pagesState.indexOfFirst { it.pdfPageIndex == currentPdfPage }
@@ -148,6 +151,7 @@ fun PdfNoteScreen(
     fun loadWork() {
         strokes.clear()
         texts.clear()
+        redoStrokes.clear()
         val idx = workPageIndex()
         if (idx >= 0) {
             val layer = pagesState[idx].layers.firstOrNull()
@@ -177,7 +181,9 @@ fun PdfNoteScreen(
     val compact = LocalConfiguration.current.screenWidthDp < 600
     val btnSize = if (compact) 38.dp else 48.dp
     val iconSize = if (compact) 20.dp else 24.dp
-    var paletteVisible by remember { mutableStateOf(!compact) }
+    // The colors + size row is part of the ribbon: show it by default here
+    // (the palette icon in the tools row still hides it).
+    var paletteVisible by remember { mutableStateOf(true) }
 
     var tool by remember { mutableStateOf(Tool.PEN) }
     var penType by remember { mutableStateOf(PenTypes.PEN) }
@@ -311,7 +317,14 @@ fun PdfNoteScreen(
         )
     }
 
+    // Auto-save when leaving the note.
+    BackHandler {
+        saveAll()
+        onBack()
+    }
+
     fun eraseAt(point: StrokePoint) {
+        redoStrokes.clear()
         strokes.removeAll { stroke ->
             stroke.points.any { p ->
                 hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) <
@@ -331,7 +344,10 @@ fun PdfNoteScreen(
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = {
+                saveAll()
+                onBack()
+            }) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Text(
@@ -468,7 +484,9 @@ fun PdfNoteScreen(
             IconButton(
                 modifier = Modifier.size(btnSize),
                 onClick = {
-                    if (strokes.isNotEmpty()) strokes.removeAt(strokes.lastIndex)
+                    if (strokes.isNotEmpty()) {
+                        redoStrokes.add(strokes.removeAt(strokes.lastIndex))
+                    }
                 }
             ) {
                 Icon(
@@ -479,7 +497,25 @@ fun PdfNoteScreen(
             }
             IconButton(
                 modifier = Modifier.size(btnSize),
-                onClick = { strokes.clear(); texts.clear() }
+                onClick = {
+                    if (redoStrokes.isNotEmpty()) {
+                        strokes.add(redoStrokes.removeAt(redoStrokes.lastIndex))
+                    }
+                }
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Redo,
+                    contentDescription = "Redo",
+                    modifier = Modifier.size(iconSize)
+                )
+            }
+            IconButton(
+                modifier = Modifier.size(btnSize),
+                onClick = {
+                    strokes.clear()
+                    texts.clear()
+                    redoStrokes.clear()
+                }
             ) {
                 Icon(
                     Icons.Filled.Delete,
@@ -800,6 +836,7 @@ fun PdfNoteScreen(
                                                 penType = penType
                                             )
                                         )
+                                        redoStrokes.clear()
                                     }
                                     currentPoints = emptyList()
                                 }
