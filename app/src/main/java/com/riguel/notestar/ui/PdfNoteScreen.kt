@@ -103,6 +103,7 @@ import com.riguel.notestar.data.Layer
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PenTypes
+import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
 import com.riguel.notestar.data.TextElement
 import com.riguel.notestar.data.TextFonts
@@ -842,9 +843,12 @@ fun PdfNoteScreen(
                                         } else {
                                             currentPoints
                                         }
+                                        // Beautifier: smooths the stroke and snaps
+                                        // near-straight lines to a clean straight
+                                        // segment (same as the note editor).
                                         strokes.add(
                                             NoteStroke(
-                                                points = rawPoints,
+                                                points = StrokeGeometry.beautify(rawPoints),
                                                 colorValue = inkColor.value,
                                                 thickness = thickness,
                                                 highlighter = tool == Tool.HIGHLIGHTER,
