@@ -641,8 +641,10 @@ fun PdfNoteScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     TextFonts.ALL.forEach { font ->
                         FilterChip(
-                            selected = formatTarget.font == font,
-                            onClick = { updateText(formatTarget.copy(font = font)) },
+                            selected = formatTarget.fontFamilyName == font,
+                            onClick = {
+                                updateText(formatTarget.copy(fontFamilyName = font))
+                            },
                             label = {
                                 Text(
                                     when (font) {
