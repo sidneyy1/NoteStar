@@ -157,6 +157,7 @@ import com.riguel.notestar.data.PageViewState
 import com.riguel.notestar.data.ToolPrefs
 import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokeGeometry
+import com.riguel.notestar.data.presetsForTool
 import com.riguel.notestar.data.StrokePoint
 import com.riguel.notestar.data.TextElement
 import com.riguel.notestar.data.TextGeometry
@@ -1924,6 +1925,7 @@ fun EditorScreen(
                             Tool.TEXT -> 5f..58f
                             else -> sizeRangeFor(tool, penType)
                         },
+                        presets = presetsForTool(tool, penType),
                         sizeUnit = "pt",
                         previewKind = when (tool) {
                             Tool.HIGHLIGHTER -> PreviewKind.HIGHLIGHTER
