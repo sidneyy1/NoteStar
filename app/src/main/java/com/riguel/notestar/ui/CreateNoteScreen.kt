@@ -55,6 +55,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.riguel.notestar.data.PageFormat
+import com.riguel.notestar.data.PageFormats
 import com.riguel.notestar.data.PageTemplate
 
 private enum class CreateKind { COVER, PAPER }
@@ -380,7 +382,7 @@ fun TemplatePicker(
 @Composable
 fun CreateNoteScreen(
     onCancel: () -> Unit,
-    onCreate: (PageTemplate, String, List<String>, ULong?) -> Unit
+    onCreate: (PageTemplate, String, List<String>, ULong?, PageFormat) -> Unit
 ) {
     var kind by remember { mutableStateOf(CreateKind.PAPER) }
     var title by remember { mutableStateOf("") }
@@ -393,7 +395,8 @@ fun CreateNoteScreen(
     var bottomTab by remember { mutableStateOf(0) }
     var showTagDialog by remember { mutableStateOf(false) }
     var tagInput by remember { mutableStateOf("") }
-    var showFormatMenu by remember { mutableStateOf(false) }
+    var pageFormat by remember { mutableStateOf(PageFormats.A4) }
+    var showPageSize by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -425,7 +428,8 @@ fun CreateNoteScreen(
                         template,
                         title.trim(),
                         tags.toList(),
-                        if (coverEnabled) coverColor?.value else null
+                        if (coverEnabled) coverColor?.value else null,
+                        pageFormat
                     )
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = DesignTokens.Accent),
@@ -529,24 +533,25 @@ fun CreateNoteScreen(
                                 )
                                 Box {
                                     Row(
-                                        modifier = Modifier.clickable { showFormatMenu = true },
+                                        modifier = Modifier.clickable { showPageSize = true },
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text("Portrait, A4", color = DesignTokens.TextSecondary, fontSize = 14.sp)
+                                        Text(
+                                            text = if (pageFormat.presetId == "custom") {
+                                                "Custom size"
+                                            } else if (pageFormat.heightPt >= pageFormat.widthPt) {
+                                                "Portrait, ${PageFormats.label(pageFormat.presetId)}"
+                                            } else {
+                                                "Landscape, ${PageFormats.label(pageFormat.presetId)}"
+                                            },
+                                            color = DesignTokens.TextSecondary,
+                                            fontSize = 14.sp
+                                        )
                                         Icon(
                                             Icons.Filled.ExpandMore,
                                             contentDescription = "Format",
                                             tint = DesignTokens.TextSecondary,
                                             modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                    DropdownMenu(
-                                        expanded = showFormatMenu,
-                                        onDismissRequest = { showFormatMenu = false }
-                                    ) {
-                                        DropdownMenuItem(
-                                            text = { Text("Portrait, A4") },
-                                            onClick = { showFormatMenu = false }
                                         )
                                     }
                                 }
@@ -636,6 +641,17 @@ fun CreateNoteScreen(
                 }
             }
         }
+    }
+
+    if (showPageSize) {
+        PageSizePickerDialog(
+            current = pageFormat,
+            onDismiss = { showPageSize = false },
+            onPick = { picked ->
+                pageFormat = picked
+                showPageSize = false
+            }
+        )
     }
 
     if (showTagDialog) {
