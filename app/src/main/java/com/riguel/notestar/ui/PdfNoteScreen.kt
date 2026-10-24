@@ -39,7 +39,9 @@ import androidx.compose.material.icons.filled.Backspace
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FormatBold
 import androidx.compose.material.icons.filled.FormatColorFill
+import androidx.compose.material.icons.filled.FormatItalic
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -51,8 +53,10 @@ import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -92,8 +96,10 @@ import androidx.compose.ui.unit.dp
 import com.riguel.notestar.data.Layer
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
+import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokePoint
 import com.riguel.notestar.data.TextElement
+import com.riguel.notestar.data.TextFonts
 import com.riguel.notestar.data.Tool
 import com.riguel.notestar.data.Stroke as NoteStroke
 import java.io.File
@@ -174,6 +180,7 @@ fun PdfNoteScreen(
     var paletteVisible by remember { mutableStateOf(!compact) }
 
     var tool by remember { mutableStateOf(Tool.PEN) }
+    var penType by remember { mutableStateOf(PenTypes.PEN) }
     var inkColor by remember { mutableStateOf(Color.Black) }
     var thickness by remember { mutableStateOf(5f) }
     var textSize by remember { mutableStateOf(16f) }
@@ -482,6 +489,36 @@ fun PdfNoteScreen(
             }
         }
 
+        // Pen types, same as the note editor's Draw options
+        if (tool == Tool.PEN) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Pen:", style = MaterialTheme.typography.bodySmall)
+                Spacer(modifier = Modifier.width(6.dp))
+                PenTypes.ALL.forEach { type ->
+                    FilterChip(
+                        selected = penType == type,
+                        onClick = { penType = type },
+                        label = {
+                            Text(
+                                when (type) {
+                                    PenTypes.PENCIL -> "Pencil"
+                                    PenTypes.CALLIGRAPHY -> "Calligraphy"
+                                    else -> "Pen"
+                                }
+                            )
+                        }
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+            }
+        }
+
         if (paletteVisible && tool != Tool.ERASER) {
             val palette = if (tool == Tool.HIGHLIGHTER) pdfHighlighterColors else pdfPenColors
             Row(
@@ -552,6 +589,74 @@ fun PdfNoteScreen(
                         onApply = { v -> thickness = v.coerceIn(1f, 60f) }
                     )
                     Text("px", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        // Text formatting for the selected text, same as the note editor
+        if (tool == Tool.TEXT) {
+            val formatTarget = texts.firstOrNull {
+                it.id == (editingTextId ?: selectedTextId)
+            }
+            if (formatTarget != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = { updateText(formatTarget.copy(bold = !formatTarget.bold)) },
+                        modifier = Modifier.size(btnSize)
+                    ) {
+                        Icon(
+                            Icons.Filled.FormatBold,
+                            contentDescription = "Bold",
+                            tint = if (formatTarget.bold) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                LocalContentColor.current
+                            },
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            updateText(formatTarget.copy(italic = !formatTarget.italic))
+                        },
+                        modifier = Modifier.size(btnSize)
+                    ) {
+                        Icon(
+                            Icons.Filled.FormatItalic,
+                            contentDescription = "Italic",
+                            tint = if (formatTarget.italic) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                LocalContentColor.current
+                            },
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TextFonts.ALL.forEach { font ->
+                        FilterChip(
+                            selected = formatTarget.font == font,
+                            onClick = { updateText(formatTarget.copy(font = font)) },
+                            label = {
+                                Text(
+                                    when (font) {
+                                        TextFonts.SERIF -> "Serif"
+                                        TextFonts.SANS -> "Sans"
+                                        TextFonts.MONO -> "Mono"
+                                        TextFonts.CURSIVE -> "Cursive"
+                                        else -> "Default"
+                                    }
+                                )
+                            }
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
                 }
             }
         }
@@ -689,7 +794,8 @@ fun PdfNoteScreen(
                                                 points = rawPoints,
                                                 colorValue = inkColor.value,
                                                 thickness = thickness,
-                                                highlighter = tool == Tool.HIGHLIGHTER
+                                                highlighter = tool == Tool.HIGHLIGHTER,
+                                                penType = penType
                                             )
                                         )
                                     }
@@ -720,7 +826,8 @@ fun PdfNoteScreen(
                                         points = currentPoints,
                                         colorValue = inkColor.value,
                                         thickness = thickness,
-                                        highlighter = tool == Tool.HIGHLIGHTER
+                                        highlighter = tool == Tool.HIGHLIGHTER,
+                                        penType = penType
                                     )
                                 )
                             }
