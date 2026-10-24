@@ -2,6 +2,7 @@ package com.riguel.notestar.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -274,7 +275,10 @@ private fun StepButton(
                         val up = event.changes.firstOrNull {
                             it.id == down.id
                         }
-                        if (up == null || up.changedToUpOrCanceled()) break
+                        // pressed == false covers both lift and
+                        // cancel (changedToUpOrCanceled does not exist
+                        // on this Compose version).
+                        if (up == null || !up.pressed) break
                     } while (true)
                     pressed = false
                 }
@@ -359,6 +363,9 @@ private fun FractionTrack(
  * little below 36dp instead of overflowing (8 x 36dp + 7 x 8dp gaps
  * = 344dp, wider than a 360dp phone's usable width).
  */
+// combinedClickable is still experimental in this Compose version
+// (BOM 2024.09.00); the opt-in is the standard way to use it.
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SwatchCell(
     color: Color,
