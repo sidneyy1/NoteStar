@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -99,6 +100,7 @@ fun NoteListItem(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onEditTags: () -> Unit,
+    onExport: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -163,6 +165,16 @@ fun NoteListItem(
                         onEditTags()
                     },
                     leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) }
+                )
+                DropdownMenuItem(
+                    text = { Text("Export as PDF") },
+                    onClick = {
+                        showMenu = false
+                        onExport()
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Filled.PictureAsPdf, contentDescription = null)
+                    }
                 )
                 DropdownMenuItem(
                     text = { Text("Delete") },
