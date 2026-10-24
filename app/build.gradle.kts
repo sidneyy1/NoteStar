@@ -12,8 +12,8 @@ android {
         applicationId = "com.riguel.notestar"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "0.9.0"
+        versionCode = 21
+        versionName = "0.10.0"
     }
 
     buildTypes {
@@ -41,6 +41,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // PDFBox (Android port): overlays vector annotations on imported PDFs
+    // for Export-as-PDF while keeping the original text selectable.
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
     // JVM unit tests: the Android framework's org.json is a stub on the JVM,
     // so tests use the real org.json implementation.
