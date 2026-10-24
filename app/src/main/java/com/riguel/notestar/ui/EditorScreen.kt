@@ -434,19 +434,22 @@ fun EditorScreen(
             ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             ?.firstOrNull()
         if (!spoken.isNullOrBlank()) {
-            val element = TextElement(
-                id = System.nanoTime().toString(),
-                x = 48f,
-                y = 96f,
-                text = spoken,
-                colorValue = inkColor.value,
-                fontSizeSp = newTextSize,
-                bold = newTextBold,
-                italic = newTextItalic,
-                fontFamilyName = newTextFont
-            )
-            texts.add(element)
-            selectedTextId = element.id
+            val layer = activeLayer()
+            if (layer != null && !layer.locked) {
+                val element = TextElement(
+                    id = System.nanoTime().toString(),
+                    x = 48f,
+                    y = 96f,
+                    text = spoken,
+                    colorValue = inkColor.value,
+                    fontSizeSp = newTextSize,
+                    bold = newTextBold,
+                    italic = newTextItalic,
+                    fontFamilyName = newTextFont
+                )
+                layer.texts.add(element)
+                selectedTextId = element.id
+            }
         }
     }
 
