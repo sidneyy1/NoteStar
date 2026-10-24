@@ -1,11 +1,14 @@
 package com.riguel.notestar
 
+import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -16,6 +19,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import com.riguel.notestar.data.BackupManager
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.NoteStorage
 import com.riguel.notestar.data.Page
@@ -108,6 +113,31 @@ fun NoteStarApp(
 
     fun notify(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    // Backup to shared storage (Documents/NoteStar). Android 8/9 needs the
+    // storage permission first; Android 10+ needs none.
+    val backupPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            val count = BackupManager.backupAll(context)
+            notify("Backed up $count note(s) to Documents/NoteStar")
+        } else {
+            notify("Storage permission is needed to save backups")
+        }
+    }
+    LaunchedEffect(Unit) {
+        // One-time: back up notes that already existed before backups shipped.
+        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("backup_migrated_v1", false)) {
+            if (BackupManager.needsLegacyPermission(context)) {
+                backupPermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            } else {
+                BackupManager.backupAll(context)
+            }
+            prefs.edit().putBoolean("backup_migrated_v1", true).apply()
+        }
     }
 
     val doc = openDoc
@@ -215,6 +245,25 @@ fun NoteStarApp(
                             } else {
                                 notify("That file could not be read as a PDF")
                             }
+                        },
+                        onBackupNow = {
+                            if (BackupManager.needsLegacyPermission(context)) {
+                                backupPermLauncher.launch(
+                                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                                )
+                            } else {
+                                val count = BackupManager.backupAll(context)
+                                notify("Backed up $count note(s) to Documents/NoteStar")
+                            }
+                        },
+                        onRestoreBackup = {
+                            val count = BackupManager.restoreAll(context)
+                            if (count > 0) {
+                                notify("Restored $count note(s) from the backup")
+                            } else {
+                                notify("No new notes found in the backup")
+                            }
+                            refresh++
                         }
                     )
                 }
