@@ -5,8 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -184,28 +182,6 @@ fun FloatingToolbar(
                 active = false, onClick = onCollapse
             )
         }
-    }
-}
-
-/**
- * The white card that floats above [FloatingToolbar] holding the active
- * tool's options (pen types, colors + size, text formatting, select hint).
- */
-@Composable
-fun ToolOptionsPopover(
-    modifier: Modifier = Modifier,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(16.dp),
-        color = Color.White,
-        shadowElevation = 6.dp
-    ) {
-        Column(
-            modifier = Modifier.padding(vertical = 6.dp),
-            content = content
-        )
     }
 }
 
