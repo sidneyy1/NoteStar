@@ -36,20 +36,26 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Backspace
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatColorFill
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -75,6 +81,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -168,6 +175,9 @@ fun PdfNoteScreen(
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
     var selectedTextId by remember { mutableStateOf<String?>(null) }
     var editingTextId by remember { mutableStateOf<String?>(null) }
+    var showMenu by remember { mutableStateOf(false) }
+    var showRename by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
     val focusRequester = remember { FocusRequester() }
 
     var initialized by remember { mutableStateOf(false) }
@@ -244,6 +254,18 @@ fun PdfNoteScreen(
         editingTextId = null
     }
 
+    fun saveAll() {
+        commitEditing()
+        snapshotWork()
+        onSave(
+            initialDoc.copy(
+                title = title.ifBlank { "Untitled" },
+                pages = pagesState.toList(),
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
     fun eraseAt(point: StrokePoint) {
         strokes.removeAll { stroke ->
             stroke.points.any { p ->
@@ -267,28 +289,57 @@ fun PdfNoteScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it },
-                placeholder = { Text("Untitled") },
-                singleLine = true,
+            Text(
+                text = title.ifBlank { "Untitled" },
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            IconButton(onClick = onEnterPip) {
-                Icon(Icons.Filled.PictureInPicture, contentDescription = "Picture in picture")
-            }
-            IconButton(onClick = {
-                commitEditing()
-                snapshotWork()
-                onSave(
-                    initialDoc.copy(
-                        title = title.ifBlank { "Untitled" },
-                        pages = pagesState.toList(),
-                        updatedAt = System.currentTimeMillis()
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(btnSize)
+                ) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "Menu",
+                        modifier = Modifier.size(iconSize)
                     )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Rename") },
+                        onClick = {
+                            showMenu = false
+                            renameText = title
+                            showRename = true
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Edit, contentDescription = null)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Picture in picture") },
+                        onClick = {
+                            showMenu = false
+                            onEnterPip()
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.PictureInPicture, contentDescription = null)
+                        }
+                    )
+                }
+            }
+            IconButton(onClick = { saveAll() }, modifier = Modifier.size(btnSize)) {
+                Icon(
+                    Icons.Filled.Save,
+                    contentDescription = "Save annotations",
+                    modifier = Modifier.size(iconSize)
                 )
-            }) {
-                Icon(Icons.Filled.Save, contentDescription = "Save annotations")
             }
         }
 
@@ -705,5 +756,31 @@ fun PdfNoteScreen(
                 }
             }
         }
+    }
+
+    if (showRename) {
+        AlertDialog(
+            onDismissRequest = { showRename = false },
+            title = { Text("Rename note") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    placeholder = { Text("Untitled") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    title = renameText
+                    showRename = false
+                    saveAll()
+                }) { Text("Rename") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRename = false }) { Text("Cancel") }
+            }
+        )
     }
 }
