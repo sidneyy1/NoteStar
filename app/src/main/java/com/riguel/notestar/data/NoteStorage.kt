@@ -48,7 +48,8 @@ object NoteStorage {
                     template = doc.pages.firstOrNull()?.template ?: PageTemplate.BLANK,
                     tags = doc.tags,
                     isPdf = doc.pdf != null,
-                    pageCount = doc.pages.size
+                    pageCount = doc.pages.size,
+                    coverColorValue = doc.coverColorValue
                 )
             } catch (e: Exception) {
                 null
