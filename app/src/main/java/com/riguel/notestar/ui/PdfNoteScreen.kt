@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.ui.draw.alpha
@@ -17,7 +18,10 @@ import com.riguel.notestar.data.EditorMode
 import kotlinx.coroutines.delay
 
 import android.graphics.Bitmap
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.util.Log
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import android.speech.RecognizerIntent
@@ -107,8 +111,12 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDown
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.input.ImeAction
@@ -129,6 +137,7 @@ import com.riguel.notestar.data.Stroke as NoteStroke
 import java.io.File
 import kotlin.math.hypot
 import kotlin.math.min
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -153,12 +162,35 @@ fun PdfNoteScreen(
     pdfFile: File,
     onBack: () -> Unit,
     onSave: (NoteDocument) -> Unit,
+    onExportRequest: (Int) -> Unit,
     onEnterPip: () -> Unit,
     tabs: List<DocTab>,
     onTabSelect: (String) -> Unit,
     onTabClose: (String) -> Unit
 ) {
     val totalPages = initialDoc.pdf?.pageCount ?: initialDoc.pages.size
+    val context = LocalContext.current
+    // Page fit: null = automatic (fit width on portrait devices, fit page
+    // on landscape ones); the "..." menu toggles it and the choice is
+    // remembered per document.
+    var fitMode by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(initialDoc.id) {
+        fitMode = context.getSharedPreferences("pdf_view", Context.MODE_PRIVATE)
+            .getString("fit_${initialDoc.id}", null)
+    }
+    val isLandscapeDevice = LocalConfiguration.current.orientation ==
+        Configuration.ORIENTATION_LANDSCAPE
+    val fitIsWidth = when (fitMode) {
+        "width" -> true
+        "page" -> false
+        else -> !isLandscapeDevice
+    }
+    fun toggleFitMode() {
+        val next = if (fitIsWidth) "page" else "width"
+        fitMode = next
+        context.getSharedPreferences("pdf_view", Context.MODE_PRIVATE)
+            .edit().putString("fit_${initialDoc.id}", next).apply()
+    }
     var title by remember { mutableStateOf(initialDoc.title) }
     val pagesState = remember {
         mutableStateListOf<Page>().apply { addAll(initialDoc.pages) }
@@ -233,7 +265,7 @@ fun PdfNoteScreen(
     var showGoToPage by remember { mutableStateOf(false) }
     var goToText by remember { mutableStateOf("") }
     var hexInput by remember { mutableStateOf("") }
-    LaunchedEffect(currentPdfPage, pdfPan) {
+    LaunchedEffect(currentPdfPage, pdfPan, pdfZoom) {
         pagePillFaded = false
         delay(2000)
         pagePillFaded = true
@@ -278,22 +310,35 @@ fun PdfNoteScreen(
             fd.close()
         }
     }
+    var renderScale by remember { mutableStateOf(2f) }
     var pageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var pageWidthPt by remember { mutableStateOf(0) }
     var pageHeightPt by remember { mutableStateOf(0) }
-    LaunchedEffect(currentPdfPage, renderer) {
+    LaunchedEffect(currentPdfPage, renderer, renderScale) {
         val r = renderer ?: return@LaunchedEffect
         try {
             val page = r.openPage(currentPdfPage)
             val w = page.width
             val h = page.height
-            val bitmap = Bitmap.createBitmap(w * 2, h * 2, Bitmap.Config.ARGB_8888)
+            // Render at displayed size x pixel ratio: the bitmap aspect
+            // always equals the page aspect (one uniform scale for both
+            // dimensions), capped so a huge zoom can't allocate forever.
+            val rs = min(renderScale, min(3200f / w, 3200f / h))
+            val bmpW = (w * rs).toInt().coerceAtLeast(1)
+            val bmpH = (h * rs).toInt().coerceAtLeast(1)
+            val bitmap = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
             bitmap.eraseColor(android.graphics.Color.WHITE)
             page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
             page.close()
             pageWidthPt = w
             pageHeightPt = h
             pageBitmap = bitmap.asImageBitmap()
+            // Debug assertion: bitmap aspect must match the page's.
+            val pageAspect = w.toFloat() / h.toFloat()
+            val bmpAspect = bmpW.toFloat() / bmpH.toFloat()
+            if (abs(bmpAspect - pageAspect) > pageAspect * 0.005f) {
+                Log.w("PdfNoteScreen", "Bitmap aspect $bmpAspect != page $pageAspect")
+            }
         } catch (e: Exception) {
             pageBitmap = null
         }
@@ -323,6 +368,10 @@ fun PdfNoteScreen(
     }
     val pageZoomInterceptor = Modifier.pointerInput(Unit) {
         awaitPointerEventScope {
+            var downTime = 0L
+            var downPos = Offset.Zero
+            var lastTapTime = 0L
+            var lastTapPos = Offset.Zero
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 if (event.changes.size > 1) {
@@ -342,6 +391,45 @@ fun PdfNoteScreen(
                     )
                     pdfZoom = newZoom
                     event.changes.forEach { it.consume() }
+                } else if (event.changes.size == 1 && pdfMode != EditorMode.DRAW) {
+                    // Double-tap toggles fit <-> 200%, anchored at the tap
+                    // (Hand/Select only — in Draw mode a tap is ink).
+                    val change = event.changes.first()
+                    if (change.changedToDown()) {
+                        downTime = change.uptimeMillis
+                        downPos = change.position
+                    } else if (change.changedToUp()) {
+                        val quick = change.uptimeMillis - downTime < 250
+                        val still = (change.position - downPos).getDistance() < 24f
+                        if (quick && still) {
+                            val now = change.uptimeMillis
+                            val nearLast = (change.position - lastTapPos)
+                                .getDistance() < 48f
+                            if (now - lastTapTime < 350 && nearLast) {
+                                if (pdfZoom > 1.05f) {
+                                    pdfZoom = 1f
+                                    pdfPan = Offset.Zero
+                                } else {
+                                    val nz = 2f
+                                    val f = nz / pdfZoom
+                                    pdfPan = clampPdfPan(
+                                        Offset(
+                                            change.position.x -
+                                                (change.position.x - pdfPan.x) * f,
+                                            change.position.y -
+                                                (change.position.y - pdfPan.y) * f
+                                        ),
+                                        nz
+                                    )
+                                    pdfZoom = nz
+                                }
+                                lastTapTime = 0L
+                            } else {
+                                lastTapTime = now
+                                lastTapPos = change.position
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -484,7 +572,13 @@ fun PdfNoteScreen(
                 showRename = true
             },
             onSave = { saveAll() },
-            onEnterPip = onEnterPip
+            onEnterPip = onEnterPip,
+            onExport = {
+                saveAll()
+                onExportRequest(currentPdfPage)
+            },
+            onFitToggle = { toggleFitMode() },
+            fitIsWidth = fitIsWidth
         )
 
         // Page surface: the page is fitted to the available width (16dp
@@ -496,6 +590,7 @@ fun PdfNoteScreen(
                 .fillMaxWidth()
                 .weight(1f)
                 .background(DesignTokens.CanvasBackground)
+                .padding(top = 16.dp)
                 .clipToBounds(),
             contentAlignment = Alignment.TopCenter
         ) {
@@ -506,15 +601,42 @@ fun PdfNoteScreen(
                     modifier = Modifier.padding(24.dp)
                 )
             } else {
-                // Fit to width: 16dp margins on both sides, and the page
-                // is never wider than 900dp (comfortable on tablets).
-                val fitScale = min(
+                // Fit modes: "width" fits the page width (16dp margins,
+                // 900dp cap); "page" also fits the height so one whole
+                // page is visible. pdfZoom multiplies from there.
+                val widthFit = min(
                     (maxWidth.value - 32f) / pageWidthPt.toFloat(),
                     900f / pageWidthPt.toFloat()
+                )
+                val heightFit = maxHeight.value / pageHeightPt.toFloat()
+                val fitScale = (
+                    if (fitIsWidth) widthFit else min(widthFit, heightFit)
                 ).coerceAtLeast(0.05f)
+                // Sharp re-render: during a pinch the layer scales the
+                // current bitmap; 300ms after the zoom settles, re-render
+                // at the new scale (px per point = fit x density x zoom).
+                val densityNow = LocalDensity.current.density
+                LaunchedEffect(fitScale, pdfZoom) {
+                    delay(300)
+                    val target = (fitScale * densityNow * pdfZoom)
+                        .coerceIn(1f, 6f)
+                    val capped = min(
+                        target,
+                        min(3200f / pageWidthPt, 3200f / pageHeightPt)
+                    )
+                    if (abs(capped - renderScale) > 0.01f) {
+                        renderScale = capped
+                    }
+                }
                 Box(
                     modifier = Modifier
-                        .size(
+                        // requiredSize, not size: size() is coerced by the
+                        // parent's constraints, so a page taller than the
+                        // viewport got its height clamped while the width
+                        // stayed — squashing the bitmap (the "stretch").
+                        // requiredSize keeps the true aspect; the parent
+                        // clips the overflow and pan/zoom handles the rest.
+                        .requiredSize(
                             width = (pageWidthPt * fitScale).dp,
                             height = (pageHeightPt * fitScale).dp
                         )
@@ -534,7 +656,7 @@ fun PdfNoteScreen(
                     Image(
                         bitmap = bitmap,
                         contentDescription = "PDF page ${currentPdfPage + 1}",
-                        contentScale = ContentScale.FillBounds,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
 
@@ -1118,7 +1240,7 @@ fun PdfNoteScreen(
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(end = 12.dp, bottom = 64.dp),
+                        .padding(end = 16.dp, bottom = 64.dp),
                     horizontalAlignment = Alignment.End
                 ) {
                     if (pdfZoom != 1f || pdfPan != Offset.Zero) {
