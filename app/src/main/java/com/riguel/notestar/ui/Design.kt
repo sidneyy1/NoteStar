@@ -24,9 +24,14 @@ object DesignTokens {
     val BannerBackground = Color(0xFFE8F4F9)
     val TextPrimary = Color(0xFF222222)
     val TextSecondary = Color(0xFF999999)
-    val Divider = Color(0xFFE6E6E6)
-    val TabInactive = Color(0xFFE9E9E9)
+    val Divider = Color(0xFFE5E5E5)
+    val TabInactive = Color(0xFFEEEEEE)
     val TabBarBackground = Color(0xFFF0F0EE)
+
+    // Editor (document-viewer style)
+    val CanvasBackground = Color(0xFFF2F2F2)
+    val IconGray = Color(0xFF444444)
+    val PageSurface = Color.White
 
     // Cover colors offered when creating a note (also used as list thumbnails).
     val CoverColors: List<Pair<String, Color>> = listOf(
