@@ -97,6 +97,66 @@ data class PdfAttachment(
     val pageCount: Int
 )
 
+/**
+ * A normal note's page size, in PDF points (1/72 inch). All geometry of a
+ * normal note (stroke points and widths, text positions and font sizes) is
+ * stored in these page coordinates, so the screen and the PDF export share
+ * one coordinate system. Imported PDFs ignore this — they keep the PDF's
+ * own page sizes.
+ */
+data class PageFormat(
+    val widthPt: Float,
+    val heightPt: Float,
+    val presetId: String = "custom"
+)
+
+/** Units offered by the custom page-size editor. */
+enum class SizeUnit { PX, MM, CM, IN }
+
+/** Built-in page sizes (portrait, points) and unit conversions. */
+object PageFormats {
+    val A3 = PageFormat(842f, 1191f, "a3")
+    val A4 = PageFormat(595f, 842f, "a4")
+    val A5 = PageFormat(420f, 595f, "a5")
+    val A6 = PageFormat(297f, 420f, "a6")
+    val B5 = PageFormat(499f, 709f, "b5")
+    val LETTER = PageFormat(612f, 792f, "letter")
+    val LEGAL = PageFormat(612f, 1008f, "legal")
+    val SQUARE = PageFormat(595f, 595f, "square")
+    val PRESETS = listOf(A3, A4, A5, A6, B5, LETTER, LEGAL, SQUARE)
+
+    fun label(presetId: String): String = when (presetId) {
+        "a3" -> "A3"
+        "a4" -> "A4"
+        "a5" -> "A5"
+        "a6" -> "A6"
+        "b5" -> "B5"
+        "letter" -> "Letter"
+        "legal" -> "Legal"
+        "square" -> "Square"
+        else -> "Custom"
+    }
+
+    /** Converts an editor value to points. 1 px = 1/96 inch. */
+    fun toPt(value: Float, unit: SizeUnit): Float = when (unit) {
+        SizeUnit.PX -> value * 72f / 96f
+        SizeUnit.MM -> value * 72f / 25.4f
+        SizeUnit.CM -> value * 72f / 2.54f
+        SizeUnit.IN -> value * 72f
+    }
+
+    /** Converts points back to an editor value. */
+    fun fromPt(pt: Float, unit: SizeUnit): Float = when (unit) {
+        SizeUnit.PX -> pt * 96f / 72f
+        SizeUnit.MM -> pt * 25.4f / 72f
+        SizeUnit.CM -> pt * 2.54f / 72f
+        SizeUnit.IN -> pt / 72f
+    }
+
+    /** The value in px (1/96 inch), used for the custom-size limits. */
+    fun toPx(pt: Float): Float = pt * 96f / 72f
+}
+
 /** A complete note: the unit saved as one JSON file. */
 data class NoteDocument(
     val id: String,
@@ -107,7 +167,9 @@ data class NoteDocument(
     val pdf: PdfAttachment? = null,
     val pages: List<Page> = listOf(Page.create(PageTemplate.BLANK)),
     /** Optional cover color (ARGB as a Compose Color value), chosen at creation. */
-    val coverColorValue: ULong? = null
+    val coverColorValue: ULong? = null,
+    /** Page size for normal notes (points). Unused for imported PDFs. */
+    val pageFormat: PageFormat = PageFormats.A4
 )
 
 /** Lightweight info about a saved note, shown in the notebook list. */
