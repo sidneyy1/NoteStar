@@ -35,12 +35,41 @@ object NoteStorage {
 
     fun newId(): String = System.currentTimeMillis().toString()
 
+    /**
+     * Reads one note file. Pre-v3 normal notes are migrated on load by
+     * [NoteJson] (legacy page units -> points); when that happens, the
+     * original file is first copied to files/migration-backup/ and the
+     * converted document is written back, so the migration runs once and
+     * the pre-migration data survives. PDF notes are never converted.
+     */
+    private fun readDoc(context: Context, file: File): NoteDocument? {
+        return try {
+            val json = JSONObject(file.readText())
+            val version = json.optInt("version", 1)
+            val doc = NoteJson.fromJson(json)
+            if (version < NoteJson.CURRENT_VERSION && doc.pdf == null) {
+                val backupDir = File(context.filesDir, "migration-backup")
+                if (!backupDir.exists()) backupDir.mkdirs()
+                val backup = File(backupDir, file.name)
+                if (!backup.exists()) {
+                    runCatching { file.copyTo(backup) }
+                }
+                runCatching {
+                    file.writeText(NoteJson.toJson(doc).toString())
+                }
+            }
+            doc
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     fun listNotes(context: Context): List<NoteMeta> {
         val files = notesDir(context).listFiles { f -> f.extension == "json" }
             ?: return emptyList()
         return files.mapNotNull { file ->
             try {
-                val doc = NoteJson.fromJson(JSONObject(file.readText()))
+                val doc = readDoc(context, file) ?: return@mapNotNull null
                 NoteMeta(
                     id = doc.id,
                     title = doc.title,
@@ -60,11 +89,7 @@ object NoteStorage {
     fun loadNote(context: Context, id: String): NoteDocument? {
         val file = noteFile(context, id)
         if (!file.exists()) return null
-        return try {
-            NoteJson.fromJson(JSONObject(file.readText()))
-        } catch (e: Exception) {
-            null
-        }
+        return readDoc(context, file)
     }
 
     fun saveNote(context: Context, doc: NoteDocument) {
