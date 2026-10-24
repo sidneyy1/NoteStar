@@ -82,6 +82,7 @@ fun HomeScreen(
     onQuickCreate: () -> Unit,
     onDelete: (NoteMeta) -> Unit,
     onEditTags: (NoteMeta, List<String>) -> Unit,
+    onExportNote: (NoteMeta) -> Unit,
     onImportPdf: (InputStream, String) -> Unit,
     onBackupNow: () -> Unit,
     onRestoreBackup: () -> Unit
@@ -520,6 +521,7 @@ fun HomeScreen(
                                         noteForTags = note
                                         tagsInput = note.tags.joinToString(", ")
                                     },
+                                    onExport = { onExportNote(note) },
                                     onDelete = { noteToDelete = note }
                                 )
                                 HorizontalDivider(
