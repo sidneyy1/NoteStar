@@ -50,7 +50,21 @@ object TextFonts {
     val ALL = listOf(DEFAULT, SERIF, SANS, MONO, CURSIVE)
 }
 
-/** A block of typed text placed on the page, with simple rich formatting. */
+/**
+ * A block of typed text placed on the page, with simple rich formatting.
+ *
+ * Geometry is in PAGE POINTS (1/72 inch), the same units strokes use:
+ * [x]/[y] are the text box's top-left corner, [fontSizeSp] is the font
+ * size in points despite its legacy name (it predates the v0.11 point
+ * model; the JSON key is still "size", so old files keep working).
+ * [widthPt] is the box's wrap width in points; null means "to the page's
+ * right edge" (x -> pageWidth), which is how unwrapped old notes behaved.
+ * [paddingPt] is the inset from the box edge to the glyphs, in points —
+ * the same value on screen and in export (v0.13: 4pt; previously the
+ * editor used 4dp/6dp screen insets that export could not reproduce).
+ * [lineHeightPt] is the line height in points; null means "this font's
+ * real line height" (see TextMetrics), which is what both renderers use.
+ */
 data class TextElement(
     val id: String,
     val x: Float,
@@ -60,7 +74,11 @@ data class TextElement(
     val fontSizeSp: Float,
     val bold: Boolean = false,
     val italic: Boolean = false,
-    val fontFamilyName: String = TextFonts.DEFAULT
+    val fontFamilyName: String = TextFonts.DEFAULT,
+    val widthPt: Float? = null,
+    val paddingPt: Float = 4f,
+    val lineHeightPt: Float? = null,
+    val underline: Boolean = false
 )
 
 /** A named layer of ink + text. List order is back-to-front. */
