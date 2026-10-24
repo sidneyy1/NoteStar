@@ -24,6 +24,7 @@ object NoteJson {
         json.put("tags", JSONArray(doc.tags))
         json.put("createdAt", doc.createdAt)
         json.put("updatedAt", doc.updatedAt)
+        doc.coverColorValue?.let { json.put("cover", it.toLong()) }
         doc.pdf?.let { pdf ->
             val p = JSONObject()
             p.put("fileName", pdf.fileName)
@@ -139,7 +140,12 @@ object NoteJson {
             createdAt = json.optLong("createdAt", 0L),
             updatedAt = json.optLong("updatedAt", 0L),
             pdf = pdf,
-            pages = pages
+            pages = pages,
+            coverColorValue = if (json.has("cover")) {
+                json.getLong("cover").toULong()
+            } else {
+                null
+            }
         )
     }
 
