@@ -12,8 +12,8 @@ android {
         applicationId = "com.riguel.notestar"
         minSdk = 26
         targetSdk = 34
-        versionCode = 38
-        versionName = "0.15.7"
+        versionCode = 39
+        versionName = "0.15.8"
     }
 
     buildTypes {
