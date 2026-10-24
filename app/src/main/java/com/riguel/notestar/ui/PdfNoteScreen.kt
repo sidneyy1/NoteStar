@@ -1,4 +1,20 @@
 package com.riguel.notestar.ui
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.layout.height
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.input.KeyboardType
+import com.riguel.notestar.data.EditorMode
+import kotlinx.coroutines.delay
 
 import android.graphics.Bitmap
 import android.content.Intent
@@ -67,6 +83,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -191,7 +208,6 @@ fun PdfNoteScreen(
     val iconSize = if (compact) 20.dp else 24.dp
     // The colors + size row is part of the ribbon: show it by default here
     // (the palette icon in the tools row still hides it).
-    var paletteVisible by remember { mutableStateOf(true) }
 
     var tool by remember { mutableStateOf(Tool.PEN) }
     var penType by remember { mutableStateOf(PenTypes.PEN) }
@@ -209,6 +225,24 @@ fun PdfNoteScreen(
     // Declared up here because switchPdfPage (below) resets them.
     var pdfZoom by remember { mutableStateOf(1f) }
     var pdfPan by remember { mutableStateOf(Offset.Zero) }
+    var pdfMode by remember { mutableStateOf(EditorMode.DRAW) }
+    var popoverOpen by remember { mutableStateOf(false) }
+    var toolsCollapsed by remember { mutableStateOf(false) }
+    var beautifyOn by remember { mutableStateOf(true) }
+    var pagePillFaded by remember { mutableStateOf(false) }
+    var showGoToPage by remember { mutableStateOf(false) }
+    var goToText by remember { mutableStateOf("") }
+    var hexInput by remember { mutableStateOf("") }
+    LaunchedEffect(currentPdfPage, pdfPan) {
+        pagePillFaded = false
+        delay(2000)
+        pagePillFaded = true
+    }
+    val pagePillAlpha by animateFloatAsState(
+        targetValue = if (pagePillFaded) 0.25f else 1f,
+        animationSpec = tween(300),
+        label = "pdfPagePillAlpha"
+    )
     val focusRequester = remember { FocusRequester() }
 
     var initialized by remember { mutableStateOf(false) }
@@ -226,6 +260,7 @@ fun PdfNoteScreen(
         editingTextId = null
         pdfZoom = 1f
         pdfPan = Offset.Zero
+        popoverOpen = false
     }
 
     // --- PDF rendering ---
@@ -272,10 +307,20 @@ fun PdfNoteScreen(
             1f
         }
 
-    // Page view zoom/pan: two-finger pinch zooms the whole PDF page (1 = the
-    // page fitted entirely into the available space), two-finger drag pans.
+    // Page view zoom/pan: pdfZoom/pdfPan drive a graphicsLayer transform
+    // on the whole page (bitmap + ink + text together), so annotations stay
+    // glued to the PDF at any zoom. Inside the page, everything is drawn in
+    // local coordinates at scaleFactor (px per PDF point).
     // (pdfZoom/pdfPan themselves are declared earlier, before switchPdfPage.)
-    val totalScale = scaleFactor * pdfZoom
+    fun clampPdfPan(pan: Offset, zoom: Float): Offset {
+        val w = canvasSize.width.toFloat()
+        val h = canvasSize.height.toFloat()
+        if (w <= 0f || h <= 0f) return pan
+        return Offset(
+            pan.x.coerceIn(-w * zoom, w * 0.5f),
+            pan.y.coerceIn(-h * zoom, h * 0.5f)
+        )
+    }
     val pageZoomInterceptor = Modifier.pointerInput(Unit) {
         awaitPointerEventScope {
             while (true) {
@@ -286,14 +331,16 @@ fun PdfNoteScreen(
                     val centroid = event.changes.fold(Offset.Zero) { acc, change ->
                         acc + change.position
                     } / event.changes.size.toFloat()
-                    val newZoom = (pdfZoom * zoomChange).coerceIn(1f, 5f)
+                    val newZoom = (pdfZoom * zoomChange).coerceIn(1f, 4f)
                     val factor = if (pdfZoom == 0f) 1f else newZoom / pdfZoom
-                    pdfPan = Offset(
-                        centroid.x - (centroid.x - pdfPan.x) * factor + panChange.x,
-                        centroid.y - (centroid.y - pdfPan.y) * factor + panChange.y
+                    pdfPan = clampPdfPan(
+                        Offset(
+                            centroid.x - (centroid.x - pdfPan.x) * factor + panChange.x,
+                            centroid.y - (centroid.y - pdfPan.y) * factor + panChange.y
+                        ),
+                        newZoom
                     )
                     pdfZoom = newZoom
-                    if (pdfZoom == 1f) pdfPan = Offset.Zero
                     event.changes.forEach { it.consume() }
                 }
             }
@@ -313,6 +360,28 @@ fun PdfNoteScreen(
             if (selectedTextId == id) selectedTextId = null
         }
         editingTextId = null
+    }
+
+    /** Tool switching, exactly as the old ribbon did it. */
+    fun applyTool(t: Tool) {
+        commitEditing()
+        tool = t
+        if (t != Tool.TEXT) selectedTextId = null
+        if (t == Tool.HIGHLIGHTER && inkColor !in pdfHighlighterColors) {
+            inkColor = pdfHighlighterColors.first()
+        }
+        if ((t == Tool.PEN || t == Tool.TEXT) && inkColor in pdfHighlighterColors) {
+            inkColor = Color.Black
+        }
+    }
+
+    fun applyHexColor() {
+        val parsed = parseHexColor(hexInput) ?: return
+        inkColor = parsed
+        if (tool == Tool.TEXT) {
+            texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
+                ?.let { updateText(it.copy(colorValue = parsed.value)) }
+        }
     }
 
     fun saveAll() {
@@ -379,7 +448,7 @@ fun PdfNoteScreen(
         strokes.removeAll { stroke ->
             stroke.points.any { p ->
                 hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) <
-                    20.0 / totalScale
+                    20.0 / scaleFactor
             }
         }
     }
@@ -408,8 +477,8 @@ fun PdfNoteScreen(
             layersActive = showAnnotations,
             onAddPage = null,
             onSidePanel = { showOutline = true },
-            onAdjust = { paletteVisible = !paletteVisible },
-            adjustActive = paletteVisible,
+            onAdjust = { popoverOpen = !popoverOpen },
+            adjustActive = popoverOpen,
             onRename = {
                 renameText = title
                 showRename = true
@@ -418,312 +487,17 @@ fun PdfNoteScreen(
             onEnterPip = onEnterPip
         )
 
-        if (!readerMode) {
-        // Page navigation
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = { switchPdfPage(currentPdfPage - 1) }) {
-                Icon(Icons.Filled.KeyboardArrowLeft, contentDescription = "Previous PDF page")
-            }
-            Text("PDF page ${currentPdfPage + 1} / $totalPages")
-            IconButton(onClick = { switchPdfPage(currentPdfPage + 1) }) {
-                Icon(Icons.Filled.KeyboardArrowRight, contentDescription = "Next PDF page")
-            }
-            if (pdfZoom != 1f) {
-                TextButton(onClick = {
-                    pdfZoom = 1f
-                    pdfPan = Offset.Zero
-                }) { Text("Reset zoom") }
-            }
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "Annotations save separately — the PDF is unchanged.",
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-
-        // Tools
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            val toolIcons = listOf(
-                Triple(Tool.PEN, Icons.Filled.Gesture, "Pen"),
-                Triple(Tool.HIGHLIGHTER, Icons.Filled.FormatColorFill, "Highlighter"),
-                Triple(Tool.TEXT, Icons.Filled.TextFields, "Text"),
-                Triple(Tool.ERASER, Icons.Filled.Backspace, "Eraser")
-            )
-            toolIcons.forEach { (t, icon, description) ->
-                IconButton(
-                    onClick = {
-                        commitEditing()
-                        tool = t
-                        if (t != Tool.TEXT) selectedTextId = null
-                        if (t == Tool.HIGHLIGHTER && inkColor !in pdfHighlighterColors) {
-                            inkColor = pdfHighlighterColors.first()
-                        }
-                        if ((t == Tool.PEN || t == Tool.TEXT) && inkColor in pdfHighlighterColors) {
-                            inkColor = Color.Black
-                        }
-                    },
-                    modifier = Modifier
-                        .size(btnSize)
-                        .background(
-                            if (t == tool) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                            CircleShape
-                        )
-                ) {
-                    Icon(icon, contentDescription = description, modifier = Modifier.size(iconSize))
-                }
-            }
-            IconButton(
-                onClick = { paletteVisible = !paletteVisible },
-                modifier = Modifier
-                    .size(btnSize)
-                    .background(
-                        if (paletteVisible) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                        CircleShape
-                    )
-            ) {
-                Icon(
-                    Icons.Filled.Palette,
-                    contentDescription = "Show / hide colors",
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-            IconButton(
-                modifier = Modifier.size(btnSize),
-                onClick = {
-                    if (strokes.isNotEmpty()) {
-                        redoStrokes.add(strokes.removeAt(strokes.lastIndex))
-                    }
-                }
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Undo,
-                    contentDescription = "Undo",
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-            IconButton(
-                modifier = Modifier.size(btnSize),
-                onClick = {
-                    if (redoStrokes.isNotEmpty()) {
-                        strokes.add(redoStrokes.removeAt(redoStrokes.lastIndex))
-                    }
-                }
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Redo,
-                    contentDescription = "Redo",
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-            IconButton(
-                modifier = Modifier.size(btnSize),
-                onClick = {
-                    strokes.clear()
-                    texts.clear()
-                    redoStrokes.clear()
-                }
-            ) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "Clear page annotations",
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-        }
-
-        // Pen types, same as the note editor's Draw options
-        if (tool == Tool.PEN) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Pen:", style = MaterialTheme.typography.bodySmall)
-                Spacer(modifier = Modifier.width(6.dp))
-                PenTypes.ALL.forEach { type ->
-                    FilterChip(
-                        selected = penType == type,
-                        onClick = { penType = type },
-                        label = {
-                            Text(
-                                when (type) {
-                                    PenTypes.PENCIL -> "Pencil"
-                                    PenTypes.CALLIGRAPHY -> "Calligraphy"
-                                    else -> "Pen"
-                                }
-                            )
-                        }
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                }
-            }
-        }
-
-        if (paletteVisible && tool != Tool.ERASER) {
-            val palette = if (tool == Tool.HIGHLIGHTER) pdfHighlighterColors else pdfPenColors
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                palette.forEach { c ->
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(c)
-                            .border(
-                                width = if (c == inkColor) 3.dp else 1.dp,
-                                color = if (c == inkColor) Color(0xFFFFC107) else Color.Gray,
-                                shape = CircleShape
-                            )
-                            .clickable {
-                                inkColor = c
-                                if (tool == Tool.TEXT) {
-                                    texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
-                                        ?.let { updateText(it.copy(colorValue = c.value)) }
-                                }
-                            }
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                if (tool == Tool.TEXT) {
-                    val target = texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
-                    Slider(
-                        value = target?.fontSizeSp ?: textSize,
-                        onValueChange = { v ->
-                            if (target != null) {
-                                updateText(target.copy(fontSizeSp = v))
-                            } else {
-                                textSize = v
-                            }
-                        },
-                        valueRange = 6f..90f,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    NumericSizeField(
-                        value = target?.fontSizeSp ?: textSize,
-                        onApply = { v ->
-                            val clamped = v.coerceIn(6f, 90f)
-                            if (target != null) {
-                                updateText(target.copy(fontSizeSp = clamped))
-                            } else {
-                                textSize = clamped
-                            }
-                        }
-                    )
-                    Text("px", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Slider(
-                        value = thickness,
-                        onValueChange = { thickness = it },
-                        valueRange = 1f..60f,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    NumericSizeField(
-                        value = thickness,
-                        onApply = { v -> thickness = v.coerceIn(1f, 60f) }
-                    )
-                    Text("px", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-
-        // Text formatting for the selected text, same as the note editor
-        if (tool == Tool.TEXT) {
-            val formatTarget = texts.firstOrNull {
-                it.id == (editingTextId ?: selectedTextId)
-            }
-            if (formatTarget != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = { updateText(formatTarget.copy(bold = !formatTarget.bold)) },
-                        modifier = Modifier.size(btnSize)
-                    ) {
-                        Icon(
-                            Icons.Filled.FormatBold,
-                            contentDescription = "Bold",
-                            tint = if (formatTarget.bold) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                LocalContentColor.current
-                            },
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    IconButton(
-                        onClick = {
-                            updateText(formatTarget.copy(italic = !formatTarget.italic))
-                        },
-                        modifier = Modifier.size(btnSize)
-                    ) {
-                        Icon(
-                            Icons.Filled.FormatItalic,
-                            contentDescription = "Italic",
-                            tint = if (formatTarget.italic) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                LocalContentColor.current
-                            },
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    TextFonts.ALL.forEach { font ->
-                        FilterChip(
-                            selected = formatTarget.fontFamilyName == font,
-                            onClick = {
-                                updateText(formatTarget.copy(fontFamilyName = font))
-                            },
-                            label = {
-                                Text(
-                                    when (font) {
-                                        TextFonts.SERIF -> "Serif"
-                                        TextFonts.SANS -> "Sans"
-                                        TextFonts.MONO -> "Mono"
-                                        TextFonts.CURSIVE -> "Cursive"
-                                        else -> "Default"
-                                    }
-                                )
-                            }
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                    }
-                }
-            }
-        }
-
-        }
-        // Page surface: the whole page is fitted into the available space
-        // (never taller/wider than it), and two-finger pinch zooms/pans it.
+        // Page surface: the page is fitted to the available width (16dp
+        // margins, capped at 900dp) at the top of the gray canvas. Pinch
+        // zooms (up to 4x); the whole page (bitmap + ink + text) moves as
+        // one graphicsLayer, so annotations stay glued to the PDF.
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .background(DesignTokens.CanvasBackground)
                 .clipToBounds(),
-            contentAlignment = Alignment.Center
+            contentAlignment = Alignment.TopCenter
         ) {
             val bitmap = pageBitmap
             if (bitmap == null || pageWidthPt == 0) {
@@ -732,10 +506,12 @@ fun PdfNoteScreen(
                     modifier = Modifier.padding(24.dp)
                 )
             } else {
+                // Fit to width: 16dp margins on both sides, and the page
+                // is never wider than 900dp (comfortable on tablets).
                 val fitScale = min(
-                    maxWidth.value / pageWidthPt.toFloat(),
-                    maxHeight.value / pageHeightPt.toFloat()
-                )
+                    (maxWidth.value - 32f) / pageWidthPt.toFloat(),
+                    900f / pageWidthPt.toFloat()
+                ).coerceAtLeast(0.05f)
                 Box(
                     modifier = Modifier
                         .size(
@@ -746,6 +522,14 @@ fun PdfNoteScreen(
                         .then(
                             if (tool != Tool.TEXT) pageZoomInterceptor else Modifier
                         )
+                        .graphicsLayer {
+                            scaleX = pdfZoom
+                            scaleY = pdfZoom
+                            translationX = pdfPan.x
+                            translationY = pdfPan.y
+                            transformOrigin = TransformOrigin(0f, 0f)
+                            shadowElevation = 12f
+                        }
                 ) {
                     Image(
                         bitmap = bitmap,
@@ -755,12 +539,20 @@ fun PdfNoteScreen(
                     )
 
                     fun toPdf(screen: Offset, pressure: Float = 1f): StrokePoint = StrokePoint(
-                        x = (screen.x - pdfPan.x) / totalScale,
-                        y = (screen.y - pdfPan.y) / totalScale,
+                        x = screen.x / scaleFactor,
+                        y = screen.y / scaleFactor,
                         pressure = pressure
                     )
 
-                    val gestureModifier = when (tool) {
+                    val gestureModifier = when (pdfMode) {
+                        EditorMode.HAND -> Modifier.pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                pdfPan = clampPdfPan(pdfPan + dragAmount, pdfZoom)
+                            }
+                        }
+                        EditorMode.SELECT -> Modifier
+                        EditorMode.DRAW -> when (tool) {
                         Tool.TEXT -> Modifier.pointerInput(tool, selectedTextId, editingTextId) {
                             coroutineScope {
                                 launch {
@@ -848,7 +640,11 @@ fun PdfNoteScreen(
                                         // segment (same as the note editor).
                                         strokes.add(
                                             NoteStroke(
-                                                points = StrokeGeometry.beautify(rawPoints),
+                                                points = if (beautifyOn) {
+                                                    StrokeGeometry.beautify(rawPoints)
+                                                } else {
+                                                    rawPoints
+                                                },
                                                 colorValue = inkColor.value,
                                                 thickness = thickness,
                                                 highlighter = tool == Tool.HIGHLIGHTER,
@@ -862,6 +658,7 @@ fun PdfNoteScreen(
                             )
                         }
                     }
+                    }
 
                     Canvas(
                         modifier = Modifier
@@ -870,8 +667,7 @@ fun PdfNoteScreen(
                             .then(gestureModifier)
                     ) {
                         withTransform({
-                            translate(pdfPan.x, pdfPan.y)
-                            scale(totalScale, totalScale, Offset.Zero)
+                            scale(scaleFactor, scaleFactor, Offset.Zero)
                         }) {
                             for (stroke in if (showAnnotations) strokes else emptyList()) {
                                 drawStrokeSmooth(stroke)
@@ -898,13 +694,13 @@ fun PdfNoteScreen(
                             val isSelected = element.id == selectedTextId
                             val position = Modifier.offset {
                                 IntOffset(
-                                    (pdfPan.x + element.x * totalScale).roundToInt(),
-                                    (pdfPan.y + element.y * totalScale).roundToInt()
+                                    (element.x * scaleFactor).roundToInt(),
+                                    (element.y * scaleFactor).roundToInt()
                                 )
                             }
                             // TextElement stores size in PDF points here.
                             val displayElement = element.copy(
-                                fontSizeSp = element.fontSizeSp * totalScale
+                                fontSizeSp = element.fontSizeSp * scaleFactor
                             )
                             if (isEditing) {
                                 BasicTextField(
@@ -931,7 +727,7 @@ fun PdfNoteScreen(
                                     style = textStyleFor(displayElement),
                                     modifier = position
                                         .then(
-                                            if (tool == Tool.TEXT && editingTextId == null) {
+                                            if ((tool == Tool.TEXT || pdfMode == EditorMode.SELECT) && editingTextId == null) {
                                                 Modifier
                                                     .background(
                                                         if (isSelected) {
@@ -941,7 +737,7 @@ fun PdfNoteScreen(
                                                         },
                                                         RoundedCornerShape(4.dp)
                                                     )
-                                                    .pointerInput(element.id, totalScale) {
+                                                    .pointerInput(element.id, scaleFactor) {
                                                         // pan/zoom are per-event changes;
                                                         // apply them to the freshest state.
                                                         detectTransformGestures { _, pan, zoom, _ ->
@@ -950,8 +746,8 @@ fun PdfNoteScreen(
                                                             } ?: element
                                                             updateText(
                                                                 base.copy(
-                                                                    x = base.x + pan.x / totalScale,
-                                                                    y = base.y + pan.y / totalScale,
+                                                                    x = base.x + pan.x / scaleFactor,
+                                                                    y = base.y + pan.y / scaleFactor,
                                                                     fontSizeSp = (base.fontSizeSp * zoom)
                                                                         .coerceIn(6f, 90f)
                                                                 )
@@ -976,7 +772,424 @@ fun PdfNoteScreen(
                     }
                 }
             }
+            // Floating tools — the same shell as the note editor:
+            // toolbar pill + options popover + page pill over the canvas.
+            if (!readerMode && pageBitmap != null) {
+                val popoverHasContent = pdfMode == EditorMode.SELECT ||
+                    (pdfMode == EditorMode.DRAW && tool != Tool.ERASER)
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    AnimatedVisibility(
+                        visible = popoverOpen && !toolsCollapsed && popoverHasContent,
+                        enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+                        exit = fadeOut(tween(150)) + shrinkVertically(tween(150))
+                    ) {
+                        ToolOptionsPopover(modifier = Modifier.fillMaxWidth()) {
+                            // Pen types, same as the note editor's Draw options
+                            if (pdfMode == EditorMode.DRAW && tool == Tool.PEN) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    PenTypes.ALL.forEach { type ->
+                                        FilterChip(
+                                            selected = penType == type,
+                                            onClick = { penType = type },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = DesignTokens.AccentTint,
+                                                selectedLabelColor = DesignTokens.TextPrimary
+                                            ),
+                                            label = {
+                                                Text(
+                                                    when (type) {
+                                                        PenTypes.PENCIL -> "Pencil"
+                                                        PenTypes.CALLIGRAPHY -> "Calligraphy"
+                                                        else -> "Pen"
+                                                    }
+                                                )
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                    }
+                                }
+                            }
+                            if (pdfMode == EditorMode.DRAW && tool != Tool.ERASER) {
+                                val palette = if (tool == Tool.HIGHLIGHTER) pdfHighlighterColors else pdfPenColors
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    palette.forEach { c ->
+                                        Box(
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .clip(CircleShape)
+                                                .background(c)
+                                                .border(
+                                                    width = if (c == inkColor) 3.dp else 1.dp,
+                                                    color = if (c == inkColor) DesignTokens.Accent else Color.Gray,
+                                                    shape = CircleShape
+                                                )
+                                                .clickable {
+                                                    inkColor = c
+                                                    if (tool == Tool.TEXT) {
+                                                        texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
+                                                            ?.let { updateText(it.copy(colorValue = c.value)) }
+                                                    }
+                                                }
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    if (tool == Tool.TEXT) {
+                                        val target = texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
+                                        Slider(
+                                            value = target?.fontSizeSp ?: textSize,
+                                            onValueChange = { v ->
+                                                if (target != null) {
+                                                    updateText(target.copy(fontSizeSp = v))
+                                                } else {
+                                                    textSize = v
+                                                }
+                                            },
+                                            valueRange = 6f..90f,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        NumericSizeField(
+                                            value = target?.fontSizeSp ?: textSize,
+                                            onApply = { v ->
+                                                val clamped = v.coerceIn(6f, 90f)
+                                                if (target != null) {
+                                                    updateText(target.copy(fontSizeSp = clamped))
+                                                } else {
+                                                    textSize = clamped
+                                                }
+                                            }
+                                        )
+                                        Text("px", style = MaterialTheme.typography.bodySmall)
+                                    } else {
+                                        // Live stroke preview
+                                        Box(
+                                            modifier = Modifier
+                                                .width(40.dp)
+                                                .height(thickness.dp.coerceIn(1.dp, 24.dp))
+                                                .clip(CircleShape)
+                                                .background(inkColor)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Slider(
+                                            value = thickness,
+                                            onValueChange = { thickness = it },
+                                            valueRange = 1f..60f,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        NumericSizeField(
+                                            value = thickness,
+                                            onApply = { v -> thickness = v.coerceIn(1f, 60f) }
+                                        )
+                                        Text("px", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(inkColor)
+                                            .border(1.dp, Color.Gray, RoundedCornerShape(6.dp))
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    OutlinedTextField(
+                                        value = hexInput,
+                                        onValueChange = { hexInput = it },
+                                        placeholder = { Text("#RRGGBB") },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                        keyboardActions = KeyboardActions(
+                                            onDone = { applyHexColor() }
+                                        ),
+                                        modifier = Modifier.width(150.dp)
+                                    )
+                                    IconButton(onClick = { applyHexColor() }) {
+                                        Icon(Icons.Filled.Check, contentDescription = "Apply hex color")
+                                    }
+                                    Text(text = "Hex color", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                            // Text formatting for the selected text, same as the note editor
+                            if (tool == Tool.TEXT) {
+                                val formatTarget = texts.firstOrNull {
+                                    it.id == (editingTextId ?: selectedTextId)
+                                }
+                                if (formatTarget != null) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState())
+                                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        IconButton(
+                                            onClick = { updateText(formatTarget.copy(bold = !formatTarget.bold)) },
+                                            modifier = Modifier.size(btnSize)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.FormatBold,
+                                                contentDescription = "Bold",
+                                                tint = if (formatTarget.bold) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    LocalContentColor.current
+                                                },
+                                                modifier = Modifier.size(iconSize)
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                updateText(formatTarget.copy(italic = !formatTarget.italic))
+                                            },
+                                            modifier = Modifier.size(btnSize)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.FormatItalic,
+                                                contentDescription = "Italic",
+                                                tint = if (formatTarget.italic) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    LocalContentColor.current
+                                                },
+                                                modifier = Modifier.size(iconSize)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        TextFonts.ALL.forEach { font ->
+                                            FilterChip(
+                                                selected = formatTarget.fontFamilyName == font,
+                                                onClick = {
+                                                    updateText(formatTarget.copy(fontFamilyName = font))
+                                                },
+                                                label = {
+                                                    Text(
+                                                        when (font) {
+                                                            TextFonts.SERIF -> "Serif"
+                                                            TextFonts.SANS -> "Sans"
+                                                            TextFonts.MONO -> "Mono"
+                                                            TextFonts.CURSIVE -> "Cursive"
+                                                            else -> "Default"
+                                                        }
+                                                    )
+                                                }
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                        }
+                                    }
+                                }
+                            }
+                            if (pdfMode == EditorMode.SELECT) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Tap a text block to select it, then drag to move it. Ink can't be selected on a PDF.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (selectedTextId != null) {
+                                        IconButton(
+                                            onClick = {
+                                                texts.removeAll { it.id == selectedTextId }
+                                                selectedTextId = null
+                                            }
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.Delete,
+                                                contentDescription = "Delete selected text"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (popoverOpen && !toolsCollapsed && popoverHasContent) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    if (!toolsCollapsed) {
+                        FloatingToolbar(
+                            mode = pdfMode,
+                            onModeTap = { m ->
+                                if (m == pdfMode) {
+                                    if (m != EditorMode.HAND) popoverOpen = !popoverOpen
+                                } else {
+                                    commitEditing()
+                                    pdfMode = m
+                                    popoverOpen = false
+                                }
+                            },
+                            tool = tool,
+                            onToolTap = { t ->
+                                if (pdfMode == EditorMode.DRAW && t == tool) {
+                                    popoverOpen = !popoverOpen
+                                } else {
+                                    if (pdfMode != EditorMode.DRAW) {
+                                        commitEditing()
+                                        pdfMode = EditorMode.DRAW
+                                    }
+                                    applyTool(t)
+                                }
+                            },
+                            magicActive = beautifyOn,
+                            onMagicTap = { beautifyOn = !beautifyOn },
+                            inkColor = inkColor,
+                            onColorTap = {
+                                if (pdfMode != EditorMode.DRAW) {
+                                    commitEditing()
+                                    pdfMode = EditorMode.DRAW
+                                }
+                                if (tool == Tool.ERASER) applyTool(Tool.PEN)
+                                popoverOpen = !popoverOpen
+                            },
+                            onUndo = {
+                                if (strokes.isNotEmpty()) {
+                                    redoStrokes.add(strokes.removeAt(strokes.lastIndex))
+                                }
+                            },
+                            onRedo = {
+                                if (redoStrokes.isNotEmpty()) {
+                                    strokes.add(redoStrokes.removeAt(redoStrokes.lastIndex))
+                                }
+                            },
+                            onDelete = {
+                                if (selectedTextId != null) {
+                                    texts.removeAll { it.id == selectedTextId }
+                                    selectedTextId = null
+                                } else {
+                                    strokes.clear()
+                                    texts.clear()
+                                    redoStrokes.clear()
+                                }
+                            },
+                            deleteEnabled = selectedTextId != null ||
+                                strokes.isNotEmpty() || texts.isNotEmpty(),
+                            onCollapse = {
+                                toolsCollapsed = true
+                                popoverOpen = false
+                            }
+                        )
+                    }
+                }
+                if (toolsCollapsed) {
+                    IconButton(
+                        onClick = { toolsCollapsed = false },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 10.dp)
+                            .background(Color.White, CircleShape)
+                            .border(1.dp, DesignTokens.Divider, CircleShape)
+                    ) {
+                        Icon(
+                            Icons.Filled.KeyboardArrowUp,
+                            contentDescription = "Show toolbar",
+                            tint = DesignTokens.IconGray
+                        )
+                    }
+                }
+                // Page pill: bottom right, fades when idle. Tapping the
+                // page count opens Go to page.
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = 64.dp),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    if (pdfZoom != 1f || pdfPan != Offset.Zero) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = Color.White,
+                            shadowElevation = 6.dp
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    pdfZoom = 1f
+                                    pdfPan = Offset.Zero
+                                }
+                            ) { Text("Reset zoom") }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    Box(modifier = Modifier.alpha(pagePillAlpha)) {
+                        PageIndicatorPill(
+                            label = "${currentPdfPage + 1} / $totalPages",
+                            onPrev = { switchPdfPage(currentPdfPage - 1) },
+                            onNext = { switchPdfPage(currentPdfPage + 1) },
+                            onLabelClick = {
+                                goToText = ""
+                                showGoToPage = true
+                            }
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    if (showGoToPage) {
+        AlertDialog(
+            onDismissRequest = { showGoToPage = false },
+            title = { Text("Go to page") },
+            text = {
+                OutlinedTextField(
+                    value = goToText,
+                    onValueChange = { goToText = it.filter { c -> c.isDigit() } },
+                    label = { Text("Page (1 to $totalPages)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            goToText.toIntOrNull()?.let {
+                                switchPdfPage((it - 1).coerceIn(0, totalPages - 1))
+                            }
+                            showGoToPage = false
+                        }
+                    )
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        goToText.toIntOrNull()?.let {
+                            switchPdfPage((it - 1).coerceIn(0, totalPages - 1))
+                        }
+                        showGoToPage = false
+                    }
+                ) { Text("Go") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showGoToPage = false }) { Text("Cancel") }
+            }
+        )
     }
 
     if (showOutline) {
@@ -1029,4 +1242,13 @@ fun PdfNoteScreen(
             }
         )
     }
+}
+
+
+/** Parses "#RRGGBB" into a Color, or null when malformed. */
+private fun parseHexColor(input: String): Color? {
+    val t = input.trim().removePrefix("#")
+    if (t.length != 6) return null
+    val v = t.toLongOrNull(16) ?: return null
+    return Color(0xFF000000.toInt() or v.toInt())
 }
