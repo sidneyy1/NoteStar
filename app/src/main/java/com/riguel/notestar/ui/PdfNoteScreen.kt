@@ -1,9 +1,13 @@
 package com.riguel.notestar.ui
 
 import android.graphics.Bitmap
+import android.content.Intent
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
+import android.speech.RecognizerIntent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -131,7 +135,10 @@ fun PdfNoteScreen(
     pdfFile: File,
     onBack: () -> Unit,
     onSave: (NoteDocument) -> Unit,
-    onEnterPip: () -> Unit
+    onEnterPip: () -> Unit,
+    tabs: List<DocTab>,
+    onTabSelect: (String) -> Unit,
+    onTabClose: (String) -> Unit
 ) {
     val totalPages = initialDoc.pdf?.pageCount ?: initialDoc.pages.size
     var title by remember { mutableStateOf(initialDoc.title) }
@@ -193,8 +200,10 @@ fun PdfNoteScreen(
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
     var selectedTextId by remember { mutableStateOf<String?>(null) }
     var editingTextId by remember { mutableStateOf<String?>(null) }
-    var showMenu by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
+    var readerMode by remember { mutableStateOf(false) }
+    var showAnnotations by remember { mutableStateOf(true) }
+    var showOutline by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     // Declared up here because switchPdfPage (below) resets them.
     var pdfZoom by remember { mutableStateOf(1f) }
@@ -323,6 +332,47 @@ fun PdfNoteScreen(
         onBack()
     }
 
+    // Switching tabs / leaving composition: persist the latest state too.
+    DisposableEffect(Unit) {
+        onDispose { saveAll() }
+    }
+
+    // Voice input: dictated text becomes a new text annotation.
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val spoken = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+        if (!spoken.isNullOrBlank()) {
+            val element = TextElement(
+                id = "t" + System.nanoTime().toString(),
+                x = 54f,
+                y = 108f,
+                text = spoken,
+                colorValue = inkColor.value,
+                fontSizeSp = textSize
+            )
+            texts.add(element)
+            selectedTextId = element.id
+        }
+    }
+
+    fun launchSpeech() {
+        try {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to add a text note")
+            }
+            speechLauncher.launch(intent)
+        } catch (e: Exception) {
+            // No speech recognizer on this device.
+        }
+    }
+
     fun eraseAt(point: StrokePoint) {
         redoStrokes.clear()
         strokes.removeAll { stroke ->
@@ -338,72 +388,36 @@ fun PdfNoteScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = {
+        // Document tabs + slim toolbar (redesign)
+        DocumentTabs(
+            tabs = tabs,
+            activeTabId = initialDoc.id,
+            onSelect = onTabSelect,
+            onClose = onTabClose
+        )
+        EditorToolbar(
+            onBack = {
                 saveAll()
                 onBack()
-            }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Text(
-                text = title.ifBlank { "Untitled" },
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier.size(btnSize)
-                ) {
-                    Icon(
-                        Icons.Filled.MoreVert,
-                        contentDescription = "Menu",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-                DropdownMenu(
-                    expanded = showMenu,
-                    onDismissRequest = { showMenu = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Rename") },
-                        onClick = {
-                            showMenu = false
-                            renameText = title
-                            showRename = true
-                        },
-                        leadingIcon = {
-                            Icon(Icons.Filled.Edit, contentDescription = null)
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Picture in picture") },
-                        onClick = {
-                            showMenu = false
-                            onEnterPip()
-                        },
-                        leadingIcon = {
-                            Icon(Icons.Filled.PictureInPicture, contentDescription = null)
-                        }
-                    )
-                }
-            }
-            IconButton(onClick = { saveAll() }, modifier = Modifier.size(btnSize)) {
-                Icon(
-                    Icons.Filled.Save,
-                    contentDescription = "Save annotations",
-                    modifier = Modifier.size(iconSize)
-                )
-            }
-        }
+            },
+            onMic = { launchSpeech() },
+            onReader = { readerMode = !readerMode },
+            readerActive = readerMode,
+            onLayers = { showAnnotations = !showAnnotations },
+            layersActive = showAnnotations,
+            onAddPage = null,
+            onSidePanel = { showOutline = true },
+            onAdjust = { paletteVisible = !paletteVisible },
+            adjustActive = paletteVisible,
+            onRename = {
+                renameText = title
+                showRename = true
+            },
+            onSave = { saveAll() },
+            onEnterPip = onEnterPip
+        )
 
+        if (!readerMode) {
         // Page navigation
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
@@ -699,6 +713,7 @@ fun PdfNoteScreen(
             }
         }
 
+        }
         // Page surface: the whole page is fitted into the available space
         // (never taller/wider than it), and two-finger pinch zooms/pans it.
         BoxWithConstraints(
@@ -854,11 +869,11 @@ fun PdfNoteScreen(
                             translate(pdfPan.x, pdfPan.y)
                             scale(totalScale, totalScale, Offset.Zero)
                         }) {
-                            for (stroke in strokes) {
+                            for (stroke in if (showAnnotations) strokes else emptyList()) {
                                 drawStrokeSmooth(stroke)
                             }
                             if (currentPoints.isNotEmpty() && tool != Tool.ERASER &&
-                                tool != Tool.TEXT
+                                tool != Tool.TEXT && showAnnotations
                             ) {
                                 drawStrokeSmooth(
                                     NoteStroke(
@@ -873,7 +888,7 @@ fun PdfNoteScreen(
                         }
                     }
 
-                    for (element in texts) {
+                    for (element in if (showAnnotations) texts else emptyList()) {
                         key(element.id) {
                             val isEditing = element.id == editingTextId
                             val isSelected = element.id == selectedTextId
@@ -958,6 +973,31 @@ fun PdfNoteScreen(
                 }
             }
         }
+    }
+
+    if (showOutline) {
+        AlertDialog(
+            onDismissRequest = { showOutline = false },
+            title = { Text("Outline") },
+            text = {
+                val items = texts.filter { it.text.isNotBlank() }
+                if (items.isEmpty()) {
+                    Text("No text on this page yet.")
+                } else {
+                    Column {
+                        items.forEach { item ->
+                            Text(
+                                text = "• " + item.text,
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showOutline = false }) { Text("Close") }
+            }
+        )
     }
 
     if (showRename) {
