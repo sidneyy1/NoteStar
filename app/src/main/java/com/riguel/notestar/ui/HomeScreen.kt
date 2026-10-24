@@ -186,10 +186,13 @@ fun HomeScreen(
             .fillMaxSize()
             .background(background)
     ) {
-        val collapsed = sidebarOverride ?: (maxWidth < 600.dp)
+        // Hoisted: maxWidth (a BoxWithConstraints receiver value) cannot be
+        // read inside nested layout lambdas below.
+        val containerWidth = maxWidth
+        val collapsed = sidebarOverride ?: (containerWidth < 600.dp)
         Row(modifier = Modifier.fillMaxSize()) {
             // ---- Sidebar ----
-            Box(modifier = Modifier.width(if (collapsed) 56.dp else (maxWidth * 0.24f).coerceIn(210.dp, 300.dp))) {
+            Box(modifier = Modifier.width(if (collapsed) 56.dp else (containerWidth * 0.24f).coerceIn(210.dp, 300.dp))) {
                 if (collapsed) {
                     SidebarRail(
                         selection = selection,
@@ -477,7 +480,7 @@ fun HomeScreen(
                         }
                     } else if (gridView) {
                         LazyVerticalGrid(
-                            columns = GridCells.Fixed(if (maxWidth >= 900.dp) 3 else 2),
+                            columns = GridCells.Fixed(if (containerWidth >= 900.dp) 3 else 2),
                             modifier = Modifier.weight(1f)
                         ) {
                             items(visibleNotes) { note ->
