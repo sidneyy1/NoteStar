@@ -112,6 +112,12 @@ object NoteJson {
         json.put("bold", text.bold)
         json.put("italic", text.italic)
         json.put("font", text.fontFamilyName)
+        // v0.13 box geometry, all in page points. Old readers ignore
+        // unknown keys, so these are additive, not a version bump.
+        text.widthPt?.let { json.put("width", it.toDouble()) }
+        json.put("padding", text.paddingPt.toDouble())
+        text.lineHeightPt?.let { json.put("lineHeight", it.toDouble()) }
+        json.put("underline", text.underline)
         return json
     }
 
@@ -251,7 +257,19 @@ object NoteJson {
                     fontSizeSp = t.optDouble("size", 20.0).toFloat(),
                     bold = t.optBoolean("bold", false),
                     italic = t.optBoolean("italic", false),
-                    fontFamilyName = t.optString("font", TextFonts.DEFAULT)
+                    fontFamilyName = t.optString("font", TextFonts.DEFAULT),
+                    widthPt = if (t.has("width")) {
+                        t.optDouble("width").toFloat()
+                    } else {
+                        null
+                    },
+                    paddingPt = t.optDouble("padding", 4.0).toFloat(),
+                    lineHeightPt = if (t.has("lineHeight")) {
+                        t.optDouble("lineHeight").toFloat()
+                    } else {
+                        null
+                    },
+                    underline = t.optBoolean("underline", false)
                 )
             )
         }
