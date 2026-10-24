@@ -19,6 +19,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FitScreen
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MenuBook
@@ -204,7 +206,10 @@ fun EditorToolbar(
     onRename: () -> Unit,
     onSave: () -> Unit,
     onEnterPip: () -> Unit,
-    onExcerpt: (() -> Unit)? = null
+    onExcerpt: (() -> Unit)? = null,
+    onExport: (() -> Unit)? = null,
+    onFitToggle: (() -> Unit)? = null,
+    fitIsWidth: Boolean = true
 ) {
     var showMenu by remember { mutableStateOf(false) }
     Row(
@@ -258,6 +263,30 @@ fun EditorToolbar(
                     },
                     leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) }
                 )
+                if (onExport != null) {
+                    DropdownMenuItem(
+                        text = { Text("Export as PDF") },
+                        onClick = {
+                            showMenu = false
+                            onExport()
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.PictureAsPdf, contentDescription = null)
+                        }
+                    )
+                }
+                if (onFitToggle != null) {
+                    DropdownMenuItem(
+                        text = { Text(if (fitIsWidth) "Fit page" else "Fit width") },
+                        onClick = {
+                            showMenu = false
+                            onFitToggle()
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.FitScreen, contentDescription = null)
+                        }
+                    )
+                }
                 if (onExcerpt != null) {
                     DropdownMenuItem(
                         text = { Text("Save page as new note") },
