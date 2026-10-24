@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -209,7 +210,8 @@ fun EditorToolbar(
     onExcerpt: (() -> Unit)? = null,
     onExport: (() -> Unit)? = null,
     onFitToggle: (() -> Unit)? = null,
-    fitIsWidth: Boolean = true
+    fitIsWidth: Boolean = true,
+    onPageSize: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     Row(
@@ -272,6 +274,18 @@ fun EditorToolbar(
                         },
                         leadingIcon = {
                             Icon(Icons.Filled.PictureAsPdf, contentDescription = null)
+                        }
+                    )
+                }
+                if (onPageSize != null) {
+                    DropdownMenuItem(
+                        text = { Text("Page size") },
+                        onClick = {
+                            showMenu = false
+                            onPageSize()
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.AspectRatio, contentDescription = null)
                         }
                     )
                 }
