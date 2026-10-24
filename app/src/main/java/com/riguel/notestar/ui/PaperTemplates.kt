@@ -255,3 +255,167 @@ fun DrawScope.drawPaperPattern(
         }
     }
 }
+
+/**
+ * Fixed geometry of the long-standing templates (Lined / Planner /
+ * Lecture), in millimetres — the single source the page-space renderer
+ * below and the PDF exporter both read, so screen and export agree.
+ */
+object LegacyPaper {
+    /** Lined margin line distance from the page's left edge. */
+    const val MARGIN_X_MM: Float = 12f
+    /** Planner time-column line distance from the left edge. */
+    const val PLANNER_COLUMN_MM: Float = 25.4f
+    /** Planner checkbox left edge. */
+    const val CHECKBOX_X_MM: Float = 15.6f
+    /** Planner checkbox size (square). */
+    const val CHECKBOX_SIZE_MM: Float = 3.7f
+    /** Checkbox top sits this far above its ruling line. */
+    const val CHECKBOX_LIFT_MM: Float = 9.5f
+    /** Lecture header rule distances from the page top. */
+    const val LECTURE_HEADER_1_MM: Float = 10.8f
+    const val LECTURE_HEADER_2_MM: Float = 20.3f
+    /** Lecture header rules start this far from the left edge. */
+    const val LECTURE_HEADER_X_MM: Float = 6.8f
+    /** One legacy page unit (at 5.9 units/mm) expressed in points. */
+    const val UNIT_TO_PT: Float = 72f / (5.9f * 25.4f)
+    /** Lined margin line color. */
+    val MARGIN_COLOR: Color = Color(0xFFF8BBD0)
+    /** Planner checkbox / lecture header color. */
+    val ACCENT_COLOR: Color = Color(0xFF90CAF9)
+}
+
+/**
+ * Draws [template]'s pattern in PAGE coordinates (points; origin at the
+ * page's top-left, y down). The caller applies the page transform — this
+ * renderer never sees screen size or viewport size, so the pattern is
+ * glued to the page at every pan and zoom. Only the part inside
+ * [visible] (page coordinates) is generated, which keeps high-zoom frames
+ * cheap; everything is vector, re-drawn crisply each frame. The pattern
+ * is background only: no layer, never erasable.
+ */
+fun DrawScope.drawPagePattern(
+    template: PageTemplate,
+    pageWidth: Float,
+    pageHeight: Float,
+    visible: androidx.compose.ui.geometry.Rect
+) {
+    if (template == PageTemplate.BLANK) return
+    val def = PaperTemplates.def(template)
+    if (def.spacingMm <= 0f) return
+    val spacing = def.spacingMm * PaperTemplates.PT_PER_MM
+    val widthPt = def.strokeWidthPx * LegacyPaper.UNIT_TO_PT
+    val pt = PaperTemplates.PT_PER_MM
+
+    fun firstAtOrAfter(start: Float, step: Float, bound: Float): Float {
+        var v = start
+        if (v < bound && step > 0f) {
+            val n = floor((bound - v) / step).toInt()
+            if (n > 0) v += n * step
+            while (v < bound) v += step
+        }
+        return v
+    }
+
+    when (def.kind) {
+        PatternKind.BLANK -> Unit
+
+        PatternKind.LINES -> {
+            val top = def.topMarginMm * pt
+            val firstLine = if (top > 0f) top else spacing
+            var y = firstAtOrAfter(firstLine, spacing, visible.top)
+            while (y <= pageHeight && y <= visible.bottom) {
+                drawLine(
+                    def.patternColor,
+                    Offset(0f, y), Offset(pageWidth, y),
+                    strokeWidth = widthPt
+                )
+                y += spacing
+            }
+            if (template == PageTemplate.LINED) {
+                val mx = LegacyPaper.MARGIN_X_MM * pt
+                drawLine(
+                    LegacyPaper.MARGIN_COLOR,
+                    Offset(mx, 0f), Offset(mx, pageHeight),
+                    strokeWidth = widthPt
+                )
+            }
+            if (template == PageTemplate.PLANNER) {
+                val cx = LegacyPaper.PLANNER_COLUMN_MM * pt
+                drawLine(
+                    def.patternColor,
+                    Offset(cx, 0f), Offset(cx, pageHeight),
+                    strokeWidth = widthPt
+                )
+                val sizePt = LegacyPaper.CHECKBOX_SIZE_MM * pt
+                val bx = LegacyPaper.CHECKBOX_X_MM * pt
+                val lift = LegacyPaper.CHECKBOX_LIFT_MM * pt
+                var ry = firstAtOrAfter(firstLine, spacing, visible.top - lift)
+                while (ry <= pageHeight && ry - lift <= visible.bottom) {
+                    val boxTop = ry - lift
+                    if (boxTop + sizePt >= visible.top) {
+                        drawRect(
+                            color = LegacyPaper.ACCENT_COLOR,
+                            topLeft = Offset(bx, boxTop),
+                            size = Size(sizePt, sizePt),
+                            style = Stroke(width = widthPt)
+                        )
+                    }
+                    ry += spacing
+                }
+            }
+            if (template == PageTemplate.LECTURE) {
+                val fromX = LegacyPaper.LECTURE_HEADER_X_MM * pt
+                for (headerMm in listOf(
+                    LegacyPaper.LECTURE_HEADER_1_MM,
+                    LegacyPaper.LECTURE_HEADER_2_MM
+                )) {
+                    val hy = headerMm * pt
+                    drawLine(
+                        LegacyPaper.ACCENT_COLOR,
+                        Offset(fromX, hy), Offset(pageWidth, hy),
+                        strokeWidth = widthPt
+                    )
+                }
+            }
+        }
+
+        PatternKind.GRID -> {
+            var x = firstAtOrAfter(spacing, spacing, visible.left)
+            while (x < pageWidth && x <= visible.right) {
+                drawLine(
+                    def.patternColor,
+                    Offset(x, 0f), Offset(x, pageHeight),
+                    strokeWidth = widthPt
+                )
+                x += spacing
+            }
+            var y = firstAtOrAfter(spacing, spacing, visible.top)
+            while (y < pageHeight && y <= visible.bottom) {
+                drawLine(
+                    def.patternColor,
+                    Offset(0f, y), Offset(pageWidth, y),
+                    strokeWidth = widthPt
+                )
+                y += spacing
+            }
+        }
+
+        PatternKind.DOTS -> {
+            val radius = def.strokeWidthPx * LegacyPaper.UNIT_TO_PT
+            var gx = firstAtOrAfter(spacing, spacing, visible.left)
+            while (gx < pageWidth && gx <= visible.right) {
+                var gy = firstAtOrAfter(spacing, spacing, visible.top)
+                while (gy < pageHeight && gy <= visible.bottom) {
+                    drawCircle(
+                        color = def.patternColor,
+                        radius = radius,
+                        center = Offset(gx, gy)
+                    )
+                    gy += spacing
+                }
+                gx += spacing
+            }
+        }
+    }
+}
