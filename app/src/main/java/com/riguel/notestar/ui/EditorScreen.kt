@@ -423,12 +423,14 @@ fun EditorScreen(
     // drag can never apply to a different box.
     //
     // Move: grab is the page-unit offset between the touch point
-    // (taken when the 8dp slop is passed, so the slop distance is
-    // absorbed and the box does not move at drag start) and the
-    // box's top-left; preview = touchPage - grab, every move event.
+    // and the box's top-left; preview = touchPage - grab, every
+    // move event. The grab is taken from the FIRST move event
+    // (detectDragGestures has already passed its slop by then),
+    // so the slop distance is absorbed and the box does not move
+    // at drag start. Null means "no grab yet" (drag just started).
     var textDragId by remember { mutableStateOf<String?>(null) }
     var textDragOrigin by remember { mutableStateOf(Offset.Zero) }
-    var textDragGrab by remember { mutableStateOf(Offset.Zero) }
+    var textDragGrab by remember { mutableStateOf<Offset?>(null) }
     var textDragPreview by remember { mutableStateOf<Offset?>(null) }
     // Resize: preview (x, widthPt) for the corner being dragged.
     var textResizeId by remember { mutableStateOf<String?>(null) }
@@ -438,7 +440,7 @@ fun EditorScreen(
         mutableStateOf<Pair<Float, Float>?>(null)
     }
     var textResizeLeftCorner by remember { mutableStateOf(false) }
-    var textResizeGrabDx by remember { mutableStateOf(0f) }
+    var textResizeGrabDx by remember { mutableStateOf<Float?>(null) }
     // Shared by both drags: last touch in page-area screen px (edge
     // auto-pan reads it) and the guides currently snapped to.
     var textDragTouch by remember { mutableStateOf<Offset?>(null) }
@@ -692,12 +694,14 @@ fun EditorScreen(
     /** Drops any live text-drag preview without writing anything. */
     fun clearTextDragState() {
         textDragId = null
+        textDragGrab = null
         textDragPreview = null
         textDragTouch = null
         textDragGuidesV = emptyList()
         textDragGuidesH = emptyList()
         textResizeId = null
         textResizePreview = null
+        textResizeGrabDx = null
     }
 
     /** Discards whatever a half-finished one-finger action changed. */
@@ -2075,11 +2079,14 @@ fun EditorScreen(
                     element, pageFormat.widthPt
                 ) * pageViewState.scale
                 // Move handle: top-center of the box, from M.
-                // Live drag (v0.15.4): an 8dp slop tells a tap from
-                // a drag; the grab is taken when the slop is passed,
-                // so the box does not move at drag start; every move
-                // event previews touchPage - grab through M, and the
-                // stored position is written exactly once, on lift.
+                // Live drag (v0.15.4, detector fixed in v0.15.7):
+                // detectDragGestures (the detector that worked
+                // before v0.15.4) tells a tap from a drag; the grab
+                // is taken from the first move event, so the slop
+                // distance is absorbed and the box does not move at
+                // drag start; every move event previews
+                // touchPage - grab through M, and the stored
+                // position is written exactly once, on lift.
                 val moveHandleOriginState = rememberUpdatedState(
                     Offset(
                         topLeft.x + boxWpx / 2f - 14f * density,
@@ -2099,62 +2106,35 @@ fun EditorScreen(
                         .background(primary, CircleShape)
                         .border(1.dp, Color.White, CircleShape)
                         .pointerInput(element.id) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown()
-                                val slopPx = 8f * density
-                                var slopTouch: Offset? = null
-                                while (slopTouch == null) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes
-                                        .firstOrNull { it.id == down.id }
-                                        ?: continue
-                                    if (!change.pressed) break
-                                    change.consume()
-                                    if ((change.position - down.position)
-                                            .getDistance() >= slopPx
+                            detectDragGestures(
+                                onDragStart = {
+                                    textDragId = element.id
+                                    textDragOrigin = Offset(
+                                        element.x, element.y
+                                    )
+                                    textDragGrab = null
+                                    textDragPreview = Offset(
+                                        element.x, element.y
+                                    )
+                                },
+                                onDragEnd = {
+                                    // Lift: commit only if a pinch
+                                    // or tool change did not already
+                                    // cancel this drag (cancel clears
+                                    // the id, so this is skipped).
+                                    if (textDragId == element.id &&
+                                        !suppressDrawing
                                     ) {
-                                        slopTouch = change.position
+                                        commitTextDrag()
                                     }
-                                }
-                                // Lift before the slop: a tap, the
-                                // selection is unchanged, no drag.
-                                if (slopTouch == null) {
-                                    return@awaitEachGesture
-                                }
-                                val origin = Offset(
-                                    element.x, element.y
-                                )
-                                val touchPage = pageViewState.toPage(
-                                    moveHandleOriginState.value + slopTouch
-                                )
-                                textDragId = element.id
-                                textDragOrigin = origin
-                                textDragGrab = touchPage - origin
-                                textDragPreview = origin
-                                textDragTouch =
-                                    moveHandleOriginState.value + slopTouch
-                                try {
-                                    while (true) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes
-                                            .firstOrNull {
-                                                it.id == down.id
-                                            } ?: continue
-                                        if (!change.pressed) {
-                                            // Lift: commit only if a
-                                            // pinch or tool change did
-                                            // not already cancel this
-                                            // drag (cancel clears the
-                                            // id, so this is skipped).
-                                            if (textDragId == element.id &&
-                                                !suppressDrawing
-                                            ) {
-                                                commitTextDrag()
-                                            }
-                                            break
-                                        }
-                                        change.consume()
-                                        if (suppressDrawing) continue
+                                    clearTextDragState()
+                                },
+                                onDragCancel = {
+                                    clearTextDragState()
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    if (!suppressDrawing) {
                                         val handleOrigin =
                                             moveHandleOriginState.value
                                         textDragTouch =
@@ -2162,6 +2142,16 @@ fun EditorScreen(
                                         val page = pageViewState.toPage(
                                             handleOrigin + change.position
                                         )
+                                        if (textDragGrab == null) {
+                                            // First move event: the
+                                            // grab absorbs everything
+                                            // up to here, so the
+                                            // preview still equals
+                                            // the origin — no jump.
+                                            textDragGrab =
+                                                page - textDragOrigin
+                                        }
+                                        val grab = textDragGrab!!
                                         val w = TextGeometry.wrapWidthPt(
                                             element, pageFormat.widthPt
                                         )
@@ -2170,10 +2160,10 @@ fun EditorScreen(
                                         )
                                         val raw = Offset(
                                             dragPreviewCoord(
-                                                page.x, textDragGrab.x
+                                                page.x, grab.x
                                             ),
                                             dragPreviewCoord(
-                                                page.y, textDragGrab.y
+                                                page.y, grab.y
                                             )
                                         )
                                         textDragPreview =
@@ -2181,12 +2171,8 @@ fun EditorScreen(
                                                 raw, w, h, element.id
                                             )
                                     }
-                                } finally {
-                                    // System cancel: drop the preview,
-                                    // never write the stored position.
-                                    clearTextDragState()
                                 }
-                            }
+                            )
                         }
                         .clickable {}
                 )
@@ -2219,68 +2205,37 @@ fun EditorScreen(
                             .background(primary, CircleShape)
                             .border(1.dp, Color.White, CircleShape)
                             .pointerInput(element.id, left) {
-                                awaitEachGesture {
-                                    val down = awaitFirstDown()
-                                    val slopPx = 8f * density
-                                    var slopTouch: Offset? = null
-                                    while (slopTouch == null) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes
-                                            .firstOrNull {
-                                                it.id == down.id
-                                            } ?: continue
-                                        if (!change.pressed) break
-                                        change.consume()
-                                        if ((change.position - down.position)
-                                                .getDistance() >= slopPx
+                                detectDragGestures(
+                                    onDragStart = {
+                                        textResizeId = element.id
+                                        textResizeStartX = element.x
+                                        textResizeStartWidth =
+                                            TextGeometry.wrapWidthPt(
+                                                element, pageFormat.widthPt
+                                            )
+                                        textResizeLeftCorner = left
+                                        textResizeGrabDx = null
+                                        textResizePreview =
+                                            element.x to
+                                                TextGeometry.wrapWidthPt(
+                                                    element,
+                                                    pageFormat.widthPt
+                                                )
+                                    },
+                                    onDragEnd = {
+                                        if (textResizeId == element.id &&
+                                            !suppressDrawing
                                         ) {
-                                            slopTouch = change.position
+                                            commitTextResize()
                                         }
-                                    }
-                                    if (slopTouch == null) {
-                                        return@awaitEachGesture
-                                    }
-                                    val startX = element.x
-                                    val startWidth =
-                                        TextGeometry.wrapWidthPt(
-                                            element, pageFormat.widthPt
-                                        )
-                                    val touchPageX = pageViewState.toPage(
-                                        cornerOriginState.value + slopTouch
-                                    ).x
-                                    val draggedEdge = if (left) {
-                                        startX
-                                    } else {
-                                        startX + startWidth
-                                    }
-                                    textResizeId = element.id
-                                    textResizeStartX = startX
-                                    textResizeStartWidth = startWidth
-                                    textResizeLeftCorner = left
-                                    textResizeGrabDx =
-                                        touchPageX - draggedEdge
-                                    textResizePreview =
-                                        startX to startWidth
-                                    textDragTouch =
-                                        cornerOriginState.value + slopTouch
-                                    try {
-                                        while (true) {
-                                            val event = awaitPointerEvent()
-                                            val change = event.changes
-                                                .firstOrNull {
-                                                    it.id == down.id
-                                                } ?: continue
-                                            if (!change.pressed) {
-                                                if (textResizeId ==
-                                                    element.id &&
-                                                    !suppressDrawing
-                                                ) {
-                                                    commitTextResize()
-                                                }
-                                                break
-                                            }
-                                            change.consume()
-                                            if (suppressDrawing) continue
+                                        clearTextDragState()
+                                    },
+                                    onDragCancel = {
+                                        clearTextDragState()
+                                    },
+                                    onDrag = { change, _ ->
+                                        change.consume()
+                                        if (!suppressDrawing) {
                                             val cornerOrigin =
                                                 cornerOriginState.value
                                             textDragTouch =
@@ -2290,8 +2245,24 @@ fun EditorScreen(
                                                 cornerOrigin +
                                                     change.position
                                             ).x
+                                            val startX = textResizeStartX
+                                            val startWidth =
+                                                textResizeStartWidth
+                                            val draggedEdge = if (left) {
+                                                startX
+                                            } else {
+                                                startX + startWidth
+                                            }
+                                            if (textResizeGrabDx == null) {
+                                                // First move event:
+                                                // the grab absorbs
+                                                // everything up to
+                                                // here — no jump.
+                                                textResizeGrabDx =
+                                                    pageX - draggedEdge
+                                            }
                                             val edge = pageX -
-                                                textResizeGrabDx
+                                                textResizeGrabDx!!
                                             textResizePreview = if (left) {
                                                 resizeLeftPreview(
                                                     startX, startWidth,
@@ -2306,10 +2277,8 @@ fun EditorScreen(
                                                 )
                                             }
                                         }
-                                    } finally {
-                                        clearTextDragState()
                                     }
-                                }
+                                )
                             }
                             .clickable {}
                     )
