@@ -445,10 +445,13 @@ fun EditorScreen(
     var textDragGuidesV by remember { mutableStateOf<List<Float>>(emptyList()) }
     var textDragGuidesH by remember { mutableStateOf<List<Float>>(emptyList()) }
     // Alignment snap, off in Settings ("snap_to_guides", default on).
-    // LocalContext directly: toolContext is declared later in this
-    // composable, and a local must be declared before it is used.
+    // The context is read here, in composable context: remember's
+    // factory is not @Composable, so LocalContext.current cannot
+    // be called inside it (and toolContext is declared later in
+    // this composable, so it cannot be used here either).
+    val snapContext = LocalContext.current
     val snapToGuides = remember {
-        LocalContext.current.getSharedPreferences(
+        snapContext.getSharedPreferences(
             "settings", Context.MODE_PRIVATE
         ).getBoolean("snap_to_guides", true)
     }
