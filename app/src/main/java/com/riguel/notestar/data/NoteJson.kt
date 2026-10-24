@@ -9,12 +9,17 @@ import org.json.JSONObject
  * Version 2: pages + layers + tags + optional PDF attachment (see
  * docs/DATA_MODEL.md). Version 1 (no "version" field, strokes/texts at the
  * root, written by NoteStar <= 0.3) is migrated on load.
+ *
+ * Version 3: normal notes store geometry in PDF POINTS and carry a
+ * pageFormat. Pre-v3 normal notes used ~150dpi page units (5.9 per mm);
+ * they are converted once on load with a single uniform factor. PDF notes
+ * always stored PDF points and are never converted.
  */
 object NoteJson {
 
-    const val CURRENT_VERSION = 2
+    const val CURRENT_VERSION = 3
 
-    // ---- writing (always v2) ----
+    // ---- writing (always v3) ----
 
     fun toJson(doc: NoteDocument): JSONObject {
         val json = JSONObject()
@@ -25,6 +30,11 @@ object NoteJson {
         json.put("createdAt", doc.createdAt)
         json.put("updatedAt", doc.updatedAt)
         doc.coverColorValue?.let { json.put("cover", it.toLong()) }
+        val pf = JSONObject()
+        pf.put("w", doc.pageFormat.widthPt.toDouble())
+        pf.put("h", doc.pageFormat.heightPt.toDouble())
+        pf.put("preset", doc.pageFormat.presetId)
+        json.put("pageFormat", pf)
         doc.pdf?.let { pdf ->
             val p = JSONObject()
             p.put("fileName", pdf.fileName)
@@ -133,7 +143,17 @@ object NoteJson {
         for (i in 0 until tagsJson.length()) {
             tags.add(tagsJson.getString(i))
         }
-        return NoteDocument(
+        val pfJson = json.optJSONObject("pageFormat")
+        val pageFormat = if (pfJson != null) {
+            PageFormat(
+                widthPt = pfJson.optDouble("w", 595.0).toFloat(),
+                heightPt = pfJson.optDouble("h", 842.0).toFloat(),
+                presetId = pfJson.optString("preset", "custom")
+            )
+        } else {
+            PageFormats.A4
+        }
+        val doc = NoteDocument(
             id = json.getString("id"),
             title = json.optString("title", "Untitled"),
             tags = tags,
@@ -145,8 +165,16 @@ object NoteJson {
                 json.getLong("cover").toULong()
             } else {
                 null
-            }
+            },
+            pageFormat = pageFormat
         )
+        // Pre-v3 normal notes: convert legacy page units to points, once.
+        val version = json.optInt("version", 1)
+        return if (version < CURRENT_VERSION && pdf == null) {
+            convertLegacyUnits(doc)
+        } else {
+            doc
+        }
     }
 
     private fun pageFromJson(json: JSONObject): Page {
@@ -244,15 +272,58 @@ object NoteJson {
             layers = listOf(layer)
         )
         val updatedAt = json.optLong("updatedAt", 0L)
-        return NoteDocument(
-            id = json.getString("id"),
-            title = json.optString("title", "Untitled"),
-            tags = emptyList(),
-            createdAt = updatedAt,
-            updatedAt = updatedAt,
-            pdf = null,
-            pages = listOf(page)
+        // v1 files are normal notes in legacy page units -> convert too.
+        return convertLegacyUnits(
+            NoteDocument(
+                id = json.getString("id"),
+                title = json.optString("title", "Untitled"),
+                tags = emptyList(),
+                createdAt = updatedAt,
+                updatedAt = updatedAt,
+                pdf = null,
+                pages = listOf(page)
+            )
         )
+    }
+
+    /**
+     * Pre-v3 normal notes stored geometry in ~150dpi page units (5.9 per
+     * mm, so an A4 page was 1239 units wide). Convert to points with one
+     * uniform factor — 72 / (5.9 x 25.4) — covering points, stroke widths
+     * and font sizes, so the layout on the point-based A4 page is exactly
+     * the layout the user drew. The note becomes an A4 document; content
+     * outside that page stays in the data (hidden, not deleted).
+     */
+    private fun convertLegacyUnits(doc: NoteDocument): NoteDocument {
+        val k = 72f / (5.9f * 25.4f)
+        val pages = doc.pages.map { page ->
+            page.copy(
+                layers = page.layers.map { layer ->
+                    layer.copy(
+                        strokes = layer.strokes.map { stroke ->
+                            stroke.copy(
+                                points = stroke.points.map { point ->
+                                    StrokePoint(
+                                        x = point.x * k,
+                                        y = point.y * k,
+                                        pressure = point.pressure
+                                    )
+                                },
+                                thickness = stroke.thickness * k
+                            )
+                        },
+                        texts = layer.texts.map { text ->
+                            text.copy(
+                                x = text.x * k,
+                                y = text.y * k,
+                                fontSizeSp = text.fontSizeSp * k
+                            )
+                        }
+                    )
+                }
+            )
+        }
+        return doc.copy(pages = pages, pageFormat = PageFormats.A4)
     }
 
     private fun parseTemplate(name: String): PageTemplate =
