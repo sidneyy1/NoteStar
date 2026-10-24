@@ -8,7 +8,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -184,6 +183,9 @@ fun PdfNoteScreen(
     var showMenu by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
+    // Declared up here because switchPdfPage (below) resets them.
+    var pdfZoom by remember { mutableStateOf(1f) }
+    var pdfPan by remember { mutableStateOf(Offset.Zero) }
     val focusRequester = remember { FocusRequester() }
 
     var initialized by remember { mutableStateOf(false) }
@@ -249,8 +251,7 @@ fun PdfNoteScreen(
 
     // Page view zoom/pan: two-finger pinch zooms the whole PDF page (1 = the
     // page fitted entirely into the available space), two-finger drag pans.
-    var pdfZoom by remember { mutableStateOf(1f) }
-    var pdfPan by remember { mutableStateOf(Offset.Zero) }
+    // (pdfZoom/pdfPan themselves are declared earlier, before switchPdfPage.)
     val totalScale = scaleFactor * pdfZoom
     val pageZoomInterceptor = Modifier.pointerInput(Unit) {
         awaitPointerEventScope {
@@ -259,7 +260,9 @@ fun PdfNoteScreen(
                 if (event.changes.size > 1) {
                     val zoomChange = event.calculateZoom()
                     val panChange = event.calculatePan()
-                    val centroid = event.calculateCentroid(useTouchSlop = false)
+                    val centroid = event.changes.fold(Offset.Zero) { acc, change ->
+                        acc + change.position
+                    } / event.changes.size.toFloat()
                     val newZoom = (pdfZoom * zoomChange).coerceIn(1f, 5f)
                     val factor = if (pdfZoom == 0f) 1f else newZoom / pdfZoom
                     pdfPan = Offset(
