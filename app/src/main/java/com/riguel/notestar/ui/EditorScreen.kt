@@ -94,8 +94,11 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -1572,8 +1575,26 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawStrokeSmooth(s
     }
     if (points.size < 2) return
     val baseColor = Color(stroke.colorValue)
+    if (stroke.highlighter) {
+        // Draw the highlight as ONE path with Multiply blending: overlapping
+        // segments can't stack up into an opaque blob, and dark text under
+        // the highlight stays fully readable (like a real highlighter).
+        val path = Path()
+        path.moveTo(points.first().x, points.first().y)
+        for (p in points.drop(1)) path.lineTo(p.x, p.y)
+        drawPath(
+            path = path,
+            color = baseColor.copy(alpha = 0.55f),
+            style = Stroke(
+                width = stroke.thickness.coerceAtLeast(0.5f),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            ),
+            blendMode = BlendMode.Multiply
+        )
+        return
+    }
     val drawColor = when {
-        stroke.highlighter -> baseColor.copy(alpha = 0.35f)
         isPencil -> baseColor.copy(alpha = 0.85f)
         else -> baseColor
     }
