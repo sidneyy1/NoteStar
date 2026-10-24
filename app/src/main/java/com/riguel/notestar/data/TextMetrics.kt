@@ -73,4 +73,39 @@ object TextMetrics {
             ratios(element.fontFamilyName, element.bold, element.italic).lineHeight *
                 element.fontSizeSp
             )
+
+    /**
+     * Wrapped box height in points, for hit-testing a tap against a
+     * text box (the editor's Draw/Text tap handler must not create a
+     * new box on top of an existing one). Lines are wrapped at the
+     * stored width with this font's real widths, via Paint; on any
+     * failure the text is treated as a single line, never a crash.
+     */
+    fun boxHeightPt(element: TextElement, pageWidthPt: Float): Float {
+        return try {
+            val family = when (element.fontFamilyName) {
+                TextFonts.SERIF -> "serif"
+                TextFonts.MONO -> "monospace"
+                TextFonts.CURSIVE -> "cursive"
+                else -> "sans-serif"
+            }
+            val style = when {
+                element.bold && element.italic -> Typeface.BOLD_ITALIC
+                element.bold -> Typeface.BOLD
+                element.italic -> Typeface.ITALIC
+                else -> Typeface.NORMAL
+            }
+            val paint = Paint().apply {
+                typeface = Typeface.create(family, style)
+                textSize = element.fontSizeSp
+            }
+            val wrapWidth = TextGeometry.wrapWidthPt(element, pageWidthPt)
+            val lines = TextGeometry.wrapLines(
+                element.text, wrapWidth, element.fontSizeSp
+            ) { text, _ -> paint.measureText(text) }
+            lines.size.coerceAtLeast(1) * lineHeightPt(element)
+        } catch (e: Exception) {
+            lineHeightPt(element)
+        }
+    }
 }
