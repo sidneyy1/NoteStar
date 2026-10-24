@@ -62,6 +62,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatBold
 import androidx.compose.material.icons.filled.FormatColorFill
 import androidx.compose.material.icons.filled.FormatItalic
+import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -130,6 +131,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -147,6 +150,8 @@ import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
 import com.riguel.notestar.data.TextElement
+import com.riguel.notestar.data.TextGeometry
+import com.riguel.notestar.data.TextMetrics
 import com.riguel.notestar.data.TextFonts
 import com.riguel.notestar.data.Tool
 import com.riguel.notestar.data.Stroke as NoteStroke
@@ -194,6 +199,11 @@ private fun penTypeLabel(name: String): String = when (name) {
     else -> "Pen"
 }
 
+/**
+ * Legacy style used ONLY by the imported-PDF editor (PdfNoteScreen).
+ * It treats the stored size as sp and is left exactly as it was, so the
+ * PDF editor does not change in v0.13.
+ */
 fun textStyleFor(element: TextElement, scale: Float = 1f): TextStyle = TextStyle(
     color = Color(element.colorValue),
     fontSize = (element.fontSizeSp * scale).sp,
@@ -201,6 +211,46 @@ fun textStyleFor(element: TextElement, scale: Float = 1f): TextStyle = TextStyle
     fontStyle = if (element.italic) FontStyle.Italic else FontStyle.Normal,
     fontFamily = fontFamilyFor(element.fontFamilyName)
 )
+
+/**
+ * Normal-note style (v0.13). The stored size is in PAGE POINTS, and
+ * [scale] is pixels per point, so the wanted pixel size is size*scale —
+ * but Compose sp values are multiplied by scaledDensity on their way to
+ * pixels, so the sp value must be size*scale/scaledDensity (see
+ * TextGeometry.spValueForPagePt). Giving Compose size*scale directly was
+ * the v0.13 text-size bug: on-screen text was scaledDensity times too
+ * big, while the exporter wrote the stored points unchanged. Line height
+ * is the font's real metrics (TextMetrics), not an estimate, and
+ * alignment is always Start, matching the exporter.
+ */
+fun textStyleForPage(
+    element: TextElement,
+    scale: Float,
+    scaledDensity: Float
+): TextStyle {
+    val ratios = TextMetrics.ratios(
+        element.fontFamilyName, element.bold, element.italic
+    )
+    val lineHeightPt = TextGeometry.lineHeightPt(element, ratios.lineHeight)
+    return TextStyle(
+        color = Color(element.colorValue),
+        fontSize = TextGeometry.spValueForPagePt(
+            element.fontSizeSp, scale, scaledDensity
+        ).sp,
+        lineHeight = TextGeometry.spValueForPagePt(
+            lineHeightPt, scale, scaledDensity
+        ).sp,
+        fontWeight = if (element.bold) FontWeight.Bold else FontWeight.Normal,
+        fontStyle = if (element.italic) FontStyle.Italic else FontStyle.Normal,
+        fontFamily = fontFamilyFor(element.fontFamilyName),
+        textAlign = TextAlign.Start,
+        textDecoration = if (element.underline) {
+            TextDecoration.Underline
+        } else {
+            TextDecoration.None
+        }
+    )
+}
 
 private fun colorToHex(c: Color): String = String.format(
     "#%02X%02X%02X",
@@ -293,6 +343,9 @@ fun EditorScreen(
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current.density
+    // sp -> pixels multiplier (density x fontScale). The page-text style
+    // divides by this, so a stored point size lands at size*viewScale px.
+    val scaledDensity = LocalDensity.current.density * LocalDensity.current.fontScale
     var pageFormat by remember { mutableStateOf(initialDoc.pageFormat) }
     var viewReady by remember { mutableStateOf(false) }
     var showZoomBadge by remember { mutableStateOf(false) }
@@ -500,6 +553,7 @@ fun EditorScreen(
     var newTextBold by remember { mutableStateOf(false) }
     var newTextItalic by remember { mutableStateOf(false) }
     var newTextFont by remember { mutableStateOf(TextFonts.DEFAULT) }
+    var newTextUnderline by remember { mutableStateOf(false) }
     var hexInput by remember { mutableStateOf(colorToHex(Color.Black)) }
     val focusRequester = remember { FocusRequester() }
 
@@ -511,11 +565,29 @@ fun EditorScreen(
         return layer.texts.firstOrNull { it.id == (editingTextId ?: selectedTextId) }
     }
 
+    /**
+     * Fill in the box geometry every text update derives from, so the
+     * stored record always matches what the editor and the exporter draw:
+     * wrap width = box to the page's right edge (the box model has no
+     * narrower width UI), line height = this font/size's real metrics.
+     * Padding is kept as stored (default 4pt, page units — never dp).
+     */
+    fun normalizeText(element: TextElement): TextElement {
+        val ratios = TextMetrics.ratios(
+            element.fontFamilyName, element.bold, element.italic
+        )
+        return element.copy(
+            widthPt = (pageFormat.widthPt - element.x).coerceAtLeast(48f),
+            lineHeightPt = element.fontSizeSp * ratios.lineHeight
+        )
+    }
+
     fun updateText(updated: TextElement) {
+        val normalized = normalizeText(updated)
         for (layer in layersWork) {
-            val i = layer.texts.indexOfFirst { it.id == updated.id }
+            val i = layer.texts.indexOfFirst { it.id == normalized.id }
             if (i >= 0) {
-                layer.texts[i] = updated
+                layer.texts[i] = normalized
                 return
             }
         }
@@ -611,16 +683,19 @@ fun EditorScreen(
         if (!spoken.isNullOrBlank()) {
             val layer = activeLayer()
             if (layer != null && !layer.locked) {
-                val element = TextElement(
-                    id = System.nanoTime().toString(),
-                    x = 48f,
-                    y = 96f,
-                    text = spoken,
-                    colorValue = inkColor.value,
-                    fontSizeSp = newTextSize,
-                    bold = newTextBold,
-                    italic = newTextItalic,
-                    fontFamilyName = newTextFont
+                val element = normalizeText(
+                    TextElement(
+                        id = System.nanoTime().toString(),
+                        x = 48f,
+                        y = 96f,
+                        text = spoken,
+                        colorValue = inkColor.value,
+                        fontSizeSp = newTextSize,
+                        bold = newTextBold,
+                        italic = newTextItalic,
+                        fontFamilyName = newTextFont,
+                        underline = newTextUnderline
+                    )
                 )
                 layer.texts.add(element)
                 selectedTextId = element.id
@@ -1035,16 +1110,19 @@ fun EditorScreen(
                                             if (layer != null && !layer.locked) {
                                                 val point = toPage(screen)
                                                 if (point.x in 0f..pageFormat.widthPt && point.y in 0f..pageFormat.heightPt) {
-                                                val element = TextElement(
-                                                    id = System.nanoTime().toString(),
-                                                    x = point.x,
-                                                    y = point.y,
-                                                    text = "",
-                                                    colorValue = inkColor.value,
-                                                    fontSizeSp = newTextSize,
-                                                    bold = newTextBold,
-                                                    italic = newTextItalic,
-                                                    fontFamilyName = newTextFont
+                                                val element = normalizeText(
+                                                    TextElement(
+                                                        id = System.nanoTime().toString(),
+                                                        x = point.x,
+                                                        y = point.y,
+                                                        text = "",
+                                                        colorValue = inkColor.value,
+                                                        fontSizeSp = newTextSize,
+                                                        bold = newTextBold,
+                                                        italic = newTextItalic,
+                                                        fontFamilyName = newTextFont,
+                                                        underline = newTextUnderline
+                                                    )
                                                 )
                                                 layer.texts.add(element)
                                                 selectedTextId = element.id
@@ -1298,22 +1376,35 @@ fun EditorScreen(
                             )
                         }
                         if (isEditing) {
+                            // Editing inset is the stored page-unit padding
+                            // (4pt -> px via viewScale), not 6dp: glyphs sit
+                            // at exactly the same place as when not editing
+                            // and as in the export.
+                            val editPaddingDp =
+                                (element.paddingPt * viewScale / density).dp
                             BasicTextField(
                                 value = element.text,
                                 onValueChange = { newValue ->
                                     updateText(element.copy(text = newValue))
                                 },
-                                textStyle = textStyleFor(element, viewScale),
+                                textStyle = textStyleForPage(
+                                    element, viewScale, scaledDensity
+                                ),
                                 cursorBrush = SolidColor(Color(0xFF1565C0)),
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                                 keyboardActions = KeyboardActions(
                                     onDone = { commitEditing() }
                                 ),
                                 modifier = position
+                                    .width(
+                                        (TextGeometry.wrapWidthPt(
+                                            element, pageFormat.widthPt
+                                        ) * viewScale / density).dp
+                                    )
                                     .focusRequester(focusRequester)
                                     .background(Color(0x143D5AFE), RoundedCornerShape(4.dp))
                                     .defaultMinSize(minWidth = 140.dp, minHeight = 40.dp)
-                                    .padding(6.dp)
+                                    .padding(editPaddingDp)
                             )
                         } else {
                             val textInteractive = editingTextId == null && !layer.locked &&
@@ -1321,10 +1412,28 @@ fun EditorScreen(
                                     mode == EditorMode.SELECT ||
                                         (mode == EditorMode.DRAW && tool == Tool.TEXT && isActiveLayer)
                                     )
+                            // Wrap width is the stored box width in page
+                            // points (to the page edge by default); the
+                            // exporter wraps at this same width.
+                            val boxWidthDp = (
+                                TextGeometry.wrapWidthPt(
+                                    element, pageFormat.widthPt
+                                ) * viewScale / density
+                                ).dp
+                            // Glyph inset is the stored page-unit padding,
+                            // not a dp inset: the old 4dp inset shifted
+                            // glyphs by 4*density/viewScale pt on screen
+                            // and by 0 in the export — the left/up offset
+                            // in the PDF.
+                            val glyphPaddingDp =
+                                (element.paddingPt * viewScale / density).dp
                             Text(
                                 text = element.text,
-                                style = textStyleFor(element, viewScale),
+                                style = textStyleForPage(
+                                    element, viewScale, scaledDensity
+                                ),
                                 modifier = position
+                                    .width(boxWidthDp)
                                     .then(
                                         if (textInteractive) {
                                             Modifier
@@ -1379,7 +1488,7 @@ fun EditorScreen(
                                             Modifier
                                         }
                                     )
-                                    .padding(4.dp)
+                                    .padding(glyphPaddingDp)
                             )
                         }
                     }
@@ -1473,6 +1582,7 @@ fun EditorScreen(
                     val target = activeText()
                     val boldActive = target?.bold ?: newTextBold
                     val italicActive = target?.italic ?: newTextItalic
+                    val underlineActive = target?.underline ?: newTextUnderline
                     val fontActive = target?.fontFamilyName ?: newTextFont
                     Row(
                         modifier = Modifier
@@ -1504,6 +1614,18 @@ fun EditorScreen(
                             )
                         ) {
                             Icon(Icons.Filled.FormatItalic, contentDescription = "Italic")
+                        }
+                        IconButton(
+                            onClick = {
+                                if (target != null) updateText(target.copy(underline = !target.underline))
+                                else newTextUnderline = !newTextUnderline
+                            },
+                            modifier = Modifier.background(
+                                if (underlineActive) DesignTokens.AccentTint else Color.Transparent,
+                                CircleShape
+                            )
+                        ) {
+                            Icon(Icons.Filled.FormatUnderlined, contentDescription = "Underline")
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         TextFonts.ALL.forEach { fontName ->
