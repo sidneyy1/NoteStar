@@ -25,7 +25,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import android.content.Intent
+import android.speech.RecognizerIntent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
@@ -74,6 +78,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -232,7 +237,10 @@ fun EditorScreen(
     onBack: () -> Unit,
     onSave: (NoteDocument) -> Unit,
     onExcerptPage: (String, Page) -> Unit,
-    onEnterPip: () -> Unit
+    onEnterPip: () -> Unit,
+    tabs: List<DocTab>,
+    onTabSelect: (String) -> Unit,
+    onTabClose: (String) -> Unit
 ) {
     var title by remember { mutableStateOf(initialDoc.title) }
     // Phones get compact chrome so the page stays visible; tablets keep
@@ -294,6 +302,13 @@ fun EditorScreen(
         viewOffset = Offset.Zero
     }
 
+    fun addPage() {
+        pagesState[currentPageIndex] = snapshotCurrentPage()
+        val newPage = Page.create(currentTemplate)
+        pagesState.add(newPage)
+        switchPage(pagesState.lastIndex)
+    }
+
     var mode by remember { mutableStateOf(EditorMode.DRAW) }
     var tool by remember { mutableStateOf(Tool.PEN) }
     var penType by remember { mutableStateOf(PenTypes.PEN) }
@@ -305,7 +320,6 @@ fun EditorScreen(
     var paletteVisible by remember { mutableStateOf(!compact) }
     var showLayers by remember { mutableStateOf(false) }
     var showOutline by remember { mutableStateOf(false) }
-    var showMenu by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     var newTextSize by remember { mutableStateOf(20f) }
@@ -412,6 +426,45 @@ fun EditorScreen(
         )
     }
 
+    // Voice input: dictated text becomes a new text block on the page.
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val spoken = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+        if (!spoken.isNullOrBlank()) {
+            val element = TextElement(
+                id = System.nanoTime().toString(),
+                x = 48f,
+                y = 96f,
+                text = spoken,
+                colorValue = inkColor.value,
+                fontSizeSp = newTextSize,
+                bold = newTextBold,
+                italic = newTextItalic,
+                fontFamilyName = newTextFont
+            )
+            texts.add(element)
+            selectedTextId = element.id
+        }
+    }
+
+    fun launchSpeech() {
+        try {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to add a text note")
+            }
+            speechLauncher.launch(intent)
+        } catch (e: Exception) {
+            // No speech recognizer on this device.
+        }
+    }
+
     LaunchedEffect(editingTextId) {
         if (editingTextId != null) focusRequester.requestFocus()
     }
@@ -423,81 +476,44 @@ fun EditorScreen(
         onBack()
     }
 
+    // Switching tabs / leaving composition: persist the latest state too.
+    DisposableEffect(Unit) {
+        onDispose { onSave(buildDocument()) }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         if (chromeVisible) {
-            // Header
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = {
+            // Document tabs + slim toolbar (redesign)
+            DocumentTabs(
+                tabs = tabs,
+                activeTabId = initialDoc.id,
+                onSelect = onTabSelect,
+                onClose = onTabClose
+            )
+            EditorToolbar(
+                onBack = {
                     commitEditing()
                     onSave(buildDocument())
                     onBack()
-                }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                }
-                Text(
-                    text = title.ifBlank { "Untitled" },
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Box {
-                    IconButton(
-                        onClick = { showMenu = true },
-                        modifier = Modifier.size(btnSize)
-                    ) {
-                        Icon(
-                            Icons.Filled.MoreVert,
-                            contentDescription = "Menu",
-                            modifier = Modifier.size(iconSize)
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Rename") },
-                            onClick = {
-                                showMenu = false
-                                renameText = title
-                                showRename = true
-                            },
-                            leadingIcon = {
-                                Icon(Icons.Filled.Edit, contentDescription = null)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Picture in picture") },
-                            onClick = {
-                                showMenu = false
-                                onEnterPip()
-                            },
-                            leadingIcon = {
-                                Icon(Icons.Filled.PictureInPicture, contentDescription = null)
-                            }
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = {
-                        commitEditing()
-                        onSave(buildDocument())
-                    },
-                    modifier = Modifier.size(btnSize)
-                ) {
-                    Icon(
-                        Icons.Filled.Save,
-                        contentDescription = "Save note",
-                        modifier = Modifier.size(iconSize)
-                    )
-                }
-            }
+                },
+                onMic = { launchSpeech() },
+                onReader = { chromeVisible = false },
+                readerActive = false,
+                onLayers = { showLayers = true },
+                onAddPage = { addPage() },
+                onSidePanel = { showOutline = true },
+                onAdjust = { beautifyOn = !beautifyOn },
+                adjustActive = beautifyOn,
+                onRename = {
+                    renameText = title
+                    showRename = true
+                },
+                onSave = {
+                    commitEditing()
+                    onSave(buildDocument())
+                },
+                onEnterPip = onEnterPip
+            )
 
             // Mode row: Select / Hand / Draw
             Row(
@@ -750,12 +766,7 @@ fun EditorScreen(
                     )
                 }
                 IconButton(
-                    onClick = {
-                        pagesState[currentPageIndex] = snapshotCurrentPage()
-                        val newPage = Page.create(currentTemplate)
-                        pagesState.add(newPage)
-                        switchPage(pagesState.lastIndex)
-                    },
+                    onClick = { addPage() },
                     modifier = Modifier.size(btnSize)
                 ) {
                     Icon(
