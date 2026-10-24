@@ -46,6 +46,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -55,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,6 +68,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.riguel.notestar.data.NoteMeta
+import com.riguel.notestar.data.NotificationCenter
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.InputStream
 
 private enum class NoteSort { NEWEST, OLDEST, TITLE }
@@ -102,6 +109,33 @@ fun HomeScreen(
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var bannerDismissed by remember {
         mutableStateOf(prefs.getBoolean("backup_banner_dismissed", false))
+    }
+    var showSaveConfirmations by remember {
+        mutableStateOf(prefs.getBoolean("show_save_confirmations", true))
+    }
+    // The menu owns the ONLY SnackbarHost for quiet messages. Editors
+    // never host one, so nothing can flash while an editor is on top.
+    val snackbarHostState = remember { SnackbarHostState() }
+    val snackbarScope = rememberCoroutineScope()
+    // Drain on every notes refresh (import/backup from the menu) and on
+    // first composition (returning from an editor). Each message shows
+    // about 2 seconds and is swipe-dismissible (SnackbarHost default).
+    androidx.compose.runtime.LaunchedEffect(notes) {
+        val events = NotificationCenter.drain(
+            System.currentTimeMillis(), showSaveConfirmations
+        )
+        for (event in events) {
+            val job = snackbarScope.launch {
+                snackbarHostState.showSnackbar(
+                    event.text, duration = SnackbarDuration.Short
+                )
+            }
+            snackbarScope.launch {
+                delay(2000)
+                snackbarHostState.currentSnackbarData?.dismiss()
+            }
+            job.join()
+        }
     }
     var showSettings by remember { mutableStateOf(false) }
     var showBackup by remember { mutableStateOf(false) }
@@ -534,6 +568,10 @@ fun HomeScreen(
                 }
             }
         }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
     }
 
     // ---- Dialogs ----
@@ -631,6 +669,36 @@ fun HomeScreen(
                             )
                         )
                     }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Notifications", fontWeight = FontWeight.Medium)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Show save confirmations",
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = showSaveConfirmations,
+                            onCheckedChange = { on ->
+                                showSaveConfirmations = on
+                                prefs.edit().putBoolean(
+                                    "show_save_confirmations", on
+                                ).apply()
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedTrackColor = DesignTokens.Accent,
+                                checkedThumbColor = Color.White
+                            )
+                        )
+                    }
+                    Text(
+                        "On: 'Note saved' appears only on the All notes " +
+                            "screen, after returning from an edited note. " +
+                            "Off: never. Failures and export results " +
+                            "always show, wherever you are.",
+                        color = DesignTokens.TextSecondary,
+                        fontSize = 12.sp
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("Accent color")
                     Spacer(modifier = Modifier.height(8.dp))
