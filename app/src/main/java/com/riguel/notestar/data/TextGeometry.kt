@@ -99,6 +99,80 @@ object TextGeometry {
         viewOffsetXPx: Float
     ): Float = viewOffsetXPx + pageWidthPt * viewScale
 
+    /**
+     * Commit math for an explicit text move (v0.14): a drag's total
+     * screen displacement, converted once with the current transform
+     * (screenToPage for a delta: pan does not enter a delta), added to
+     * the position captured at drag start. Zoom and pan never enter
+     * this except through [viewScale] at commit time, and the result
+     * is written once, at drag end — never per event, never during a
+     * pinch. The anchor is the box's top-left; nothing here clamps
+     * the result to the viewport or to (0, 0).
+     */
+    fun moveCommit(
+        startX: Float,
+        startY: Float,
+        dragDxPx: Float,
+        dragDyPx: Float,
+        viewScale: Float
+    ): Pair<Float, Float> = Pair(
+        startX + dragDxPx / viewScale,
+        startY + dragDyPx / viewScale
+    )
+
+    /**
+     * Commit math for an explicit corner resize (v0.14): a drag's total
+     * horizontal screen displacement, converted with the current
+     * transform. Right corners move the right edge (x fixed, width
+     * changes); left corners move the left edge (right edge fixed, so
+     * x and width both change). Width is kept in [48, pageWidth - x]
+     * so the stored width always equals the width the renderer draws
+     * (wrapWidthPt clamps to the page edge); x is never forced to 0
+     * by this function, but a left-corner drag cannot push x below 0
+     * or the width below 48pt. Written once, at drag end.
+     */
+    fun resizeCommit(
+        startX: Float,
+        startWidth: Float,
+        dragDxPx: Float,
+        viewScale: Float,
+        leftCorner: Boolean,
+        pageWidthPt: Float
+    ): Pair<Float, Float> {
+        val dx = dragDxPx / viewScale
+        return if (leftCorner) {
+            val newX = (startX + dx).coerceIn(
+                0f, startX + startWidth - 48f
+            )
+            val newWidth = (startWidth - (newX - startX)).coerceIn(
+                48f, (pageWidthPt - newX).coerceAtLeast(48f)
+            )
+            Pair(newX, newWidth)
+        } else {
+            val newWidth = (startWidth + dx).coerceIn(
+                48f, (pageWidthPt - startX).coerceAtLeast(48f)
+            )
+            Pair(startX, newWidth)
+        }
+    }
+
+    /**
+     * One-time diagnostic for the v0.14 drift report (never a repair):
+     * how many text boxes in [texts] sit outside the page rectangle.
+     * This function only counts; no caller may modify a box because
+     * of it — a box outside the page is kept exactly as stored, since
+     * a position near (0, 0) may be a box the user really placed
+     * there and no move history is recorded to tell the difference.
+     */
+    fun outOfPageCount(
+        texts: List<TextElement>,
+        pageWidthPt: Float,
+        pageHeightPt: Float
+    ): Int = texts.count { el ->
+        el.x < 0f || el.y < 0f ||
+            el.x > pageWidthPt || el.y > pageHeightPt
+    }
+
     /** Wrap width in points for a box on a page of [pageWidthPt]. */
     fun wrapWidthPt(element: TextElement, pageWidthPt: Float): Float {
         val toEdge = (pageWidthPt - element.x).coerceAtLeast(10f)
