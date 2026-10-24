@@ -76,7 +76,9 @@ fun HomeScreen(
     onCreate: (PageTemplate, String) -> Unit,
     onDelete: (NoteMeta) -> Unit,
     onEditTags: (NoteMeta, List<String>) -> Unit,
-    onImportPdf: (InputStream, String) -> Unit
+    onImportPdf: (InputStream, String) -> Unit,
+    onBackupNow: () -> Unit,
+    onRestoreBackup: () -> Unit
 ) {
     var showTemplatePicker by remember { mutableStateOf(false) }
     var pendingTemplate by remember { mutableStateOf<PageTemplate?>(null) }
@@ -172,6 +174,16 @@ fun HomeScreen(
             TextButton(onClick = { pdfLauncher.launch(arrayOf("application/pdf")) }) {
                 Text("Import PDF to annotate")
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBackupNow) { Text("Backup now") }
+                TextButton(onClick = onRestoreBackup) { Text("Restore backup") }
+            }
+            Text(
+                text = "Every save is also copied to Documents/NoteStar, so your " +
+                    "notes stay on the phone even if the app is uninstalled. " +
+                    "After reinstalling, tap Restore backup to bring them back.",
+                style = MaterialTheme.typography.bodySmall
+            )
 
             // Tag filter
             if (allTags.isNotEmpty()) {
