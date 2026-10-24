@@ -113,6 +113,9 @@ fun HomeScreen(
     var showSaveConfirmations by remember {
         mutableStateOf(prefs.getBoolean("show_save_confirmations", true))
     }
+    var snapToGuides by remember {
+        mutableStateOf(prefs.getBoolean("snap_to_guides", true))
+    }
     // The menu owns the ONLY SnackbarHost for quiet messages. Editors
     // never host one, so nothing can flash while an editor is on top.
     val snackbarHostState = remember { SnackbarHostState() }
@@ -696,6 +699,34 @@ fun HomeScreen(
                             "screen, after returning from an edited note. " +
                             "Off: never. Failures and export results " +
                             "always show, wherever you are.",
+                        color = DesignTokens.TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Snap dragged text to guides",
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = snapToGuides,
+                            onCheckedChange = { on ->
+                                snapToGuides = on
+                                prefs.edit().putBoolean(
+                                    "snap_to_guides", on
+                                ).apply()
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedTrackColor = DesignTokens.Accent,
+                                checkedThumbColor = Color.White
+                            )
+                        )
+                    }
+                    Text(
+                        "On: while dragging a text box, its edges and " +
+                            "center snap to the page center, page edges " +
+                            "and other boxes, showing thin teal guides. " +
+                            "Off: the box follows the finger freely.",
                         color = DesignTokens.TextSecondary,
                         fontSize = 12.sp
                     )
