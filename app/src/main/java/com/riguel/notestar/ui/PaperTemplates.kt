@@ -35,6 +35,8 @@ data class PaperTemplateDef(
 object PaperTemplates {
     /** Page coordinates are ~150 dpi: 150 / 25.4 ≈ 5.9 units per mm. */
     const val UNITS_PER_MM: Float = 5.9f
+    /** Points (1/72 inch) per millimetre — the note page space. */
+    const val PT_PER_MM: Float = 72f / 25.4f
 
     /** Width of an A4 page in page-coordinate units. */
     const val A4_WIDTH_UNITS: Float = 210f * UNITS_PER_MM
@@ -119,8 +121,13 @@ fun DrawScope.drawPaperPattern(
     template: PageTemplate,
     scale: Float,
     offset: Offset,
-    size: Size
+    size: Size,
+    unitsPerMm: Float = PaperTemplates.UNITS_PER_MM
 ) {
+    // Legacy templates were laid out in ~150dpi page units; [u] converts
+    // their constants into the caller's space (points for the bounded
+    // editor, units for thumbnails).
+    val u = unitsPerMm / PaperTemplates.UNITS_PER_MM
     if (template == PageTemplate.BLANK) return
     val left = -offset.x / scale
     val top = -offset.y / scale
@@ -158,37 +165,37 @@ fun DrawScope.drawPaperPattern(
             ) {
                 // Legacy geometry, unchanged: 72-unit ruling + margin line.
                 val lineColor = Color(0xFFBBDEFB)
-                val startY = if (template == PageTemplate.LECTURE) 168f else 72f
-                var y = floor((top - startY) / 72f) * 72f + startY
+                val startY = (if (template == PageTemplate.LECTURE) 168f else 72f) * u
+                var y = floor((top - startY) / (72f * u)) * (72f * u) + startY
                 if (y < startY) y = startY
                 while (y <= bottom) {
                     if (y >= startY) hLine(y, lineColor, 2f)
-                    y += 72f
+                    y += 72f * u
                 }
-                vLine(72f, Color(0xFFF8BBD0), 2f)
+                vLine(72f * u, Color(0xFFF8BBD0), 2f)
                 if (template == PageTemplate.PLANNER) {
                     // Time column + checkboxes down the left side
-                    vLine(150f, lineColor, 2f)
+                    vLine(150f * u, lineColor, 2f)
                     var cy = startY
                     while (cy <= bottom) {
-                        val topPx = (cy - 56f) * scale + offset.y
+                        val topPx = (cy - 56f * u) * scale + offset.y
                         drawRect(
                             color = Color(0xFF90CAF9),
-                            topLeft = Offset(92f * scale + offset.x, topPx),
-                            size = Size(22f * scale, 22f * scale),
+                            topLeft = Offset(92f * u * scale + offset.x, topPx),
+                            size = Size(22f * u * scale, 22f * u * scale),
                             style = Stroke(width = 2f)
                         )
-                        cy += 72f
+                        cy += 72f * u
                     }
                 }
                 if (template == PageTemplate.LECTURE) {
                     // Title / date header lines
-                    hLine(64f, Color(0xFF90CAF9), 2f, fromX = 40f)
-                    hLine(120f, Color(0xFF90CAF9), 2f, fromX = 40f)
+                    hLine(64f * u, Color(0xFF90CAF9), 2f, fromX = 40f * u)
+                    hLine(120f * u, Color(0xFF90CAF9), 2f, fromX = 40f * u)
                 }
             } else {
-                val step = def.spacingMm * PaperTemplates.UNITS_PER_MM
-                val startY = def.topMarginMm * PaperTemplates.UNITS_PER_MM
+                val step = def.spacingMm * unitsPerMm
+                val startY = def.topMarginMm * unitsPerMm
                 var y = floor((top - startY) / step) * step + startY
                 if (y < startY) y = startY
                 while (y <= bottom) {
@@ -199,7 +206,7 @@ fun DrawScope.drawPaperPattern(
         }
 
         PatternKind.GRID -> {
-            val step = def.spacingMm * PaperTemplates.UNITS_PER_MM
+            val step = def.spacingMm * unitsPerMm
             var gx = floor(left / step) * step
             while (gx <= right) {
                 vLine(gx, def.patternColor, def.strokeWidthPx)
@@ -215,7 +222,7 @@ fun DrawScope.drawPaperPattern(
         PatternKind.DOTS -> {
             if (template == PageTemplate.DOTTED) {
                 // Legacy mind-map dot grid (48-unit step), unchanged.
-                val step = 48f
+                val step = 48f * u
                 var gx = floor(left / step) * step
                 while (gx <= right) {
                     var gy = floor(top / step) * step
@@ -230,7 +237,7 @@ fun DrawScope.drawPaperPattern(
                     gx += step
                 }
             } else {
-                val step = def.spacingMm * PaperTemplates.UNITS_PER_MM
+                val step = def.spacingMm * unitsPerMm
                 var gx = floor(left / step) * step
                 while (gx <= right) {
                     var gy = floor(top / step) * step
