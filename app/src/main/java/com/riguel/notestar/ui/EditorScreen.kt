@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Surface
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.ui.draw.alpha
 import kotlinx.coroutines.delay
@@ -103,6 +104,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -130,7 +135,9 @@ import com.riguel.notestar.data.EditorMode
 import com.riguel.notestar.data.Layer
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
+import com.riguel.notestar.data.PageFormat
 import com.riguel.notestar.data.PageTemplate
+import com.riguel.notestar.data.PageTransform
 import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
@@ -143,6 +150,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlinx.coroutines.coroutineScope
@@ -278,6 +286,90 @@ fun EditorScreen(
     var selectedStroke by remember { mutableStateOf<Pair<String, Int>?>(null) }
     var viewScale by remember { mutableStateOf(1f) }
     var viewOffset by remember { mutableStateOf(Offset.Zero) }
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current.density
+    var pageFormat by remember { mutableStateOf(initialDoc.pageFormat) }
+    var viewReady by remember { mutableStateOf(false) }
+    var showZoomBadge by remember { mutableStateOf(false) }
+    var showPageSize by remember { mutableStateOf(false) }
+
+    // Bounded page model: geometry lives in points on a page of
+    // pageFormat.widthPt x pageFormat.heightPt. The minimum zoom is the
+    // fit scale below; the maximum is 4x it (400%).
+    val fitScaleNow: Float = if (canvasSize.width > 0) {
+        val marginPx = 32f * density
+        val capPx = 900f * density
+        val wFit = min(
+            (canvasSize.width - marginPx) / pageFormat.widthPt,
+            capPx / pageFormat.widthPt
+        )
+        val hFit = (canvasSize.height - marginPx) / pageFormat.heightPt
+        if (canvasSize.width > canvasSize.height) min(wFit, hFit) else wFit
+    } else {
+        1f
+    }
+
+    fun fitOffset(scale: Float): Offset {
+        if (canvasSize.width == 0) return Offset.Zero
+        val pw = pageFormat.widthPt * scale
+        val ph = pageFormat.heightPt * scale
+        val x = (canvasSize.width - pw) / 2f
+        val y = if (ph <= canvasSize.height) {
+            (canvasSize.height - ph) / 2f
+        } else {
+            16f * density
+        }
+        return Offset(x, y)
+    }
+
+    /** Pan clamp: at least 48dp of the page always stays on screen. */
+    fun clampViewOffset(o: Offset, scale: Float): Offset {
+        if (canvasSize.width == 0) return o
+        val keep = 48f * density
+        val pw = pageFormat.widthPt * scale
+        val ph = pageFormat.heightPt * scale
+        val xRange = (keep - pw)..(canvasSize.width - keep)
+        val yRange = (keep - ph)..(canvasSize.height - keep)
+        return Offset(
+            x = if (xRange.start <= xRange.endInclusive) {
+                o.x.coerceIn(xRange)
+            } else {
+                (canvasSize.width - pw) / 2f
+            },
+            y = if (yRange.start <= yRange.endInclusive) {
+                o.y.coerceIn(yRange)
+            } else {
+                (canvasSize.height - ph) / 2f
+            }
+        )
+    }
+
+    fun resetViewToFit() {
+        if (canvasSize.width > 0) {
+            viewScale = fitScaleNow
+            viewOffset = fitOffset(fitScaleNow)
+        }
+    }
+
+    /** True when any stored content falls outside [fmt]'s page. */
+    fun contentOutsidePage(fmt: PageFormat): Boolean {
+        val pages = pagesState.mapIndexed { i, p ->
+            if (i == currentPageIndex) snapshotCurrentPage() else p
+        }
+        return pages.any { page ->
+            page.layers.any { layer ->
+                layer.strokes.any { stroke ->
+                    stroke.points.any { pt ->
+                        pt.x < 0f || pt.y < 0f ||
+                            pt.x > fmt.widthPt || pt.y > fmt.heightPt
+                    }
+                } || layer.texts.any { text ->
+                    text.x < 0f || text.y < 0f ||
+                        text.x > fmt.widthPt || text.y > fmt.heightPt
+                }
+            }
+        }
+    }
 
     fun loadWork(page: Page) {
         layersWork.clear()
@@ -302,6 +394,23 @@ fun EditorScreen(
         initialized = true
     }
 
+    // Frame the page (fit) as soon as the canvas size is known.
+    LaunchedEffect(canvasSize) {
+        if (canvasSize.width > 0 && !viewReady) {
+            resetViewToFit()
+            viewReady = true
+        }
+    }
+
+    // Brief zoom-percentage badge while the zoom changes.
+    LaunchedEffect(viewScale) {
+        if (viewReady) {
+            showZoomBadge = true
+            delay(1200)
+            showZoomBadge = false
+        }
+    }
+
     fun activeLayer(): LayerWork? =
         layersWork.firstOrNull { it.id == activeLayerId } ?: layersWork.firstOrNull()
 
@@ -314,8 +423,7 @@ fun EditorScreen(
         selectedTextId = null
         editingTextId = null
         selectedStroke = null
-        viewScale = 1f
-        viewOffset = Offset.Zero
+        resetViewToFit()
     }
 
     fun addPage() {
@@ -329,7 +437,7 @@ fun EditorScreen(
     var tool by remember { mutableStateOf(Tool.PEN) }
     var penType by remember { mutableStateOf(PenTypes.PEN) }
     var inkColor by remember { mutableStateOf(Color.Black) }
-    var thickness by remember { mutableStateOf(6f) }
+    var thickness by remember { mutableStateOf(3f) }
     var currentPoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
     var beautifyOn by remember { mutableStateOf(false) }
     var chromeVisible by remember { mutableStateOf(true) }
@@ -350,7 +458,7 @@ fun EditorScreen(
     var showOutline by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
-    var newTextSize by remember { mutableStateOf(20f) }
+    var newTextSize by remember { mutableStateOf(10f) }
     var newTextBold by remember { mutableStateOf(false) }
     var newTextItalic by remember { mutableStateOf(false) }
     var newTextFont by remember { mutableStateOf(TextFonts.DEFAULT) }
@@ -450,6 +558,7 @@ fun EditorScreen(
         return initialDoc.copy(
             title = title.ifBlank { "Untitled" },
             pages = pagesState.toList(),
+            pageFormat = pageFormat,
             updatedAt = System.currentTimeMillis()
         )
     }
@@ -552,7 +661,10 @@ fun EditorScreen(
                     commitEditing()
                     onSave(buildDocument())
                     onExportRequest(currentPageIndex)
-                }
+                },
+                onFitToggle = { resetViewToFit() },
+                fitIsWidth = true,
+                onPageSize = { showPageSize = true }
             )
 
             val layerNow = activeLayer()
@@ -570,27 +682,54 @@ fun EditorScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(Color.White)
+                .background(DesignTokens.CanvasBackground)
+                .onSizeChanged { canvasSize = it }
                 .clipToBounds()
         ) {
-            fun toPage(screen: Offset, pressure: Float = 1f): StrokePoint = StrokePoint(
-                x = (screen.x - viewOffset.x) / viewScale,
-                y = (screen.y - viewOffset.y) / viewScale,
-                pressure = pressure
-            )
+            fun toPage(screen: Offset, pressure: Float = 1f): StrokePoint {
+                val p = PageTransform.toPage(screen, viewScale, viewOffset)
+                return StrokePoint(x = p.x, y = p.y, pressure = pressure)
+            }
 
             val gestureModifier = when (mode) {
-                EditorMode.HAND -> Modifier.pointerInput(mode) {
-                    detectTransformGestures { centroid, pan, zoom, _ ->
-                        val newScale = (viewScale * zoom).coerceIn(0.3f, 4f)
-                        val factor = newScale / viewScale
-                        viewOffset = Offset(
-                            x = centroid.x - (centroid.x - viewOffset.x) * factor + pan.x,
-                            y = centroid.y - (centroid.y - viewOffset.y) * factor + pan.y
-                        )
-                        viewScale = newScale
+                EditorMode.HAND -> Modifier
+                    .pointerInput(mode) {
+                        detectTransformGestures { centroid, pan, zoom, _ ->
+                            // Zoom clamps to [fit, 400% of fit]; pan keeps
+                            // at least 48dp of the page on screen.
+                            val newScale = (viewScale * zoom)
+                                .coerceIn(fitScaleNow, fitScaleNow * 4f)
+                            val factor = newScale / viewScale
+                            viewOffset = clampViewOffset(
+                                Offset(
+                                    x = centroid.x - (centroid.x - viewOffset.x) * factor + pan.x,
+                                    y = centroid.y - (centroid.y - viewOffset.y) * factor + pan.y
+                                ),
+                                newScale
+                            )
+                            viewScale = newScale
+                        }
                     }
-                }
+                    .pointerInput(mode) {
+                        detectTapGestures(
+                            onDoubleTap = { pos ->
+                                if (viewScale > fitScaleNow * 1.05f) {
+                                    resetViewToFit()
+                                } else {
+                                    val target = fitScaleNow * 2f
+                                    val f = target / viewScale
+                                    viewOffset = clampViewOffset(
+                                        Offset(
+                                            pos.x - (pos.x - viewOffset.x) * f,
+                                            pos.y - (pos.y - viewOffset.y) * f
+                                        ),
+                                        target
+                                    )
+                                    viewScale = target
+                                }
+                            }
+                        )
+                    }
                 EditorMode.SELECT -> Modifier.pointerInput(mode) {
                     coroutineScope {
                         launch {
@@ -661,6 +800,7 @@ fun EditorScreen(
                                             val layer = activeLayer()
                                             if (layer != null && !layer.locked) {
                                                 val point = toPage(screen)
+                                                if (point.x in 0f..pageFormat.widthPt && point.y in 0f..pageFormat.heightPt) {
                                                 val element = TextElement(
                                                     id = System.nanoTime().toString(),
                                                     x = point.x,
@@ -675,6 +815,7 @@ fun EditorScreen(
                                                 layer.texts.add(element)
                                                 selectedTextId = element.id
                                                 editingTextId = element.id
+                                                }
                                             }
                                         }
                                     }
@@ -689,7 +830,7 @@ fun EditorScreen(
                                             updateText(
                                                 target.copy(
                                                     fontSizeSp = (target.fontSizeSp * zoom)
-                                                        .coerceIn(10f, 120f)
+                                                        .coerceIn(5f, 58f)
                                                 )
                                             )
                                         }
@@ -706,7 +847,10 @@ fun EditorScreen(
                                     val point = toPage(screen)
                                     if (tool == Tool.ERASER) {
                                         eraseAt(point)
-                                    } else {
+                                    } else if (
+                                        point.x in 0f..pageFormat.widthPt &&
+                                        point.y in 0f..pageFormat.heightPt
+                                    ) {
                                         currentPoints = listOf(point)
                                     }
                                 }
@@ -779,11 +923,39 @@ fun EditorScreen(
                     .fillMaxSize()
                     .then(gestureModifier)
             ) {
-                drawPaperPattern(currentTemplate, viewScale, viewOffset, size)
+                // The bounded page sheet: soft shadow + white paper. The
+                // template pattern is clipped to the page rectangle.
+                val sheetSize = androidx.compose.ui.geometry.Size(
+                    pageFormat.widthPt * viewScale,
+                    pageFormat.heightPt * viewScale
+                )
+                drawRoundRect(
+                    color = Color(0x22000000),
+                    topLeft = Offset(viewOffset.x, viewOffset.y + 6f),
+                    size = sheetSize,
+                    cornerRadius = CornerRadius(6f, 6f)
+                )
+                drawRect(
+                    color = Color.White,
+                    topLeft = viewOffset,
+                    size = sheetSize
+                )
+                clipRect(
+                    left = viewOffset.x,
+                    top = viewOffset.y,
+                    right = viewOffset.x + sheetSize.width,
+                    bottom = viewOffset.y + sheetSize.height
+                ) {
+                    drawPaperPattern(
+                        currentTemplate, viewScale, viewOffset, size,
+                        PaperTemplates.PT_PER_MM
+                    )
+                }
                 withTransform({
                     translate(viewOffset.x, viewOffset.y)
                     scale(viewScale, viewScale, Offset.Zero)
                 }) {
+                    clipRect(0f, 0f, pageFormat.widthPt, pageFormat.heightPt) {
                     for (layer in layersWork) {
                         if (!layer.visible) continue
                         for (stroke in layer.strokes) {
@@ -826,9 +998,27 @@ fun EditorScreen(
                             }
                         }
                     }
+                    }
                 }
             }
 
+            // Text overlays live in a page-sized box pinned to the
+            // sheet and clipped to its edge; positions inside are
+            // page-local (the same pattern as the PDF page box).
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            viewOffset.x.roundToInt(),
+                            viewOffset.y.roundToInt()
+                        )
+                    }
+                    .size(
+                        width = (pageFormat.widthPt * viewScale / density).dp,
+                        height = (pageFormat.heightPt * viewScale / density).dp
+                    )
+                    .clipToBounds()
+            ) {
             // Typed text elements (visible layers only)
             for (layer in layersWork) {
                 if (!layer.visible) continue
@@ -839,8 +1029,8 @@ fun EditorScreen(
                         val isSelected = element.id == selectedTextId
                         val position = Modifier.offset {
                             IntOffset(
-                                (viewOffset.x + element.x * viewScale).roundToInt(),
-                                (viewOffset.y + element.y * viewScale).roundToInt()
+                                (element.x * viewScale).roundToInt(),
+                                (element.y * viewScale).roundToInt()
                             )
                         }
                         if (isEditing) {
@@ -901,7 +1091,7 @@ fun EditorScreen(
                                                                 x = base.x + pan.x / viewScale,
                                                                 y = base.y + pan.y / viewScale,
                                                                 fontSizeSp = (base.fontSizeSp * zoom)
-                                                                    .coerceIn(10f, 120f)
+                                                                    .coerceIn(5f, 58f)
                                                             )
                                                         )
                                                     }
@@ -928,6 +1118,31 @@ fun EditorScreen(
                     }
                 }
             }
+
+            }
+
+            // Zoom percentage, shown briefly while zooming.
+            if (showZoomBadge) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color.White,
+                        shadowElevation = 6.dp
+                    ) {
+                        Text(
+                            text = "${(viewScale / fitScaleNow * 100).roundToInt()}%",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = DesignTokens.TextPrimary,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+
 
             // Fullscreen toggle (always available)
             IconButton(
@@ -1097,14 +1312,14 @@ fun EditorScreen(
                                     if (target != null) updateText(target.copy(fontSizeSp = v))
                                     else newTextSize = v
                                 },
-                                valueRange = 10f..120f,
+                                valueRange = 5f..58f,
                                 modifier = Modifier.weight(1f)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             NumericSizeField(
                                 value = target?.fontSizeSp ?: newTextSize,
                                 onApply = { v ->
-                                    val clamped = v.coerceIn(10f, 120f)
+                                    val clamped = v.coerceIn(5f, 58f)
                                     if (target != null) {
                                         updateText(target.copy(fontSizeSp = clamped))
                                     } else {
@@ -1112,20 +1327,20 @@ fun EditorScreen(
                                     }
                                 }
                             )
-                            Text("px", style = MaterialTheme.typography.bodySmall)
+                            Text("pt", style = MaterialTheme.typography.bodySmall)
                         } else {
                             Slider(
                                 value = thickness,
                                 onValueChange = { thickness = it },
-                                valueRange = 1f..60f,
+                                valueRange = 0.5f..29f,
                                 modifier = Modifier.weight(1f)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             NumericSizeField(
                                 value = thickness,
-                                onApply = { v -> thickness = v.coerceIn(1f, 60f) }
+                                onApply = { v -> thickness = v.coerceIn(0.5f, 29f) }
                             )
-                            Text("px", style = MaterialTheme.typography.bodySmall)
+                            Text("pt", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                     Row(
@@ -1309,6 +1524,20 @@ fun EditorScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showRename = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showPageSize) {
+        PageSizePickerDialog(
+            current = pageFormat,
+            clipsContent = { candidate -> contentOutsidePage(candidate) },
+            onDismiss = { showPageSize = false },
+            onPick = { picked ->
+                pageFormat = picked
+                showPageSize = false
+                resetViewToFit()
+                onSave(buildDocument())
             }
         )
     }
