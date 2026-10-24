@@ -32,8 +32,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import android.graphics.Paint
-import android.graphics.Typeface
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -130,7 +128,12 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -139,6 +142,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -257,61 +261,70 @@ fun textStyleForPage(
 
 /**
  * Draw one text box on the page Canvas, inside the caller's
- * withTransform + page clip (v0.14.1). This is the ONLY display path
- * for non-editing text: the old separate Text-composable overlay is
- * gone, so text cannot diverge from ink — both go through the same
- * matrix M (translate + uniform scale, pivot at the page origin) and
- * the same page-rectangle clip. The Paint's textSize is in PAGE
- * units (points); the canvas matrix scales it to fontSize x zoom on
- * screen, so text stays the same size relative to the page at every
- * zoom and stays crisp (vector glyphs, never a bitmap). Multi-line
- * text is wrapped at the stored width with this font's real Paint
- * widths, exactly as the exporter wraps it; the first baseline is
- * boxTop + padding + real ascent, and each line steps by the real
- * line height. Emoji renders through the system font fallback chain
- * (Noto Color Emoji) on the same matrix — it is not a separate view
- * and scales with the text around it. A word longer than the box is
- * broken by TextGeometry.wrapLines, which never splits a surrogate
- * pair, so an emoji is never torn in half.
+ * withTransform + page clip (v0.14.1, fixed in v0.14.2). This is the
+ * ONLY display path for non-editing text: the old separate
+ * Text-composable overlay is gone, so text cannot diverge from ink —
+ * both go through the same matrix M (translate + uniform scale,
+ * pivot at the page origin) and the same page-rectangle clip.
+ *
+ * How it stays in page units: the layout is measured with a TextStyle
+ * whose sp values are the page-unit sizes divided by scaledDensity
+ * (the same trick as textStyleForPage), so the measured layout is
+ * exactly fontSizePt wide/tall in "pixels" — i.e. in page units.
+ * Drawn inside the transform, the matrix then scales it to
+ * fontSize x zoom on screen, so text stays the same size relative to
+ * the page at every zoom and stays crisp (vector glyphs, never a
+ * bitmap). The layout wraps at the stored width, its top is
+ * boxTop + padding, and its line height is the real line height —
+ * the same numbers the exporter uses. Emoji renders through Compose
+ * text layout's system font fallback on the same matrix, not as a
+ * separate view.
+ *
+ * v0.14.2 note: the first version of this function used
+ * drawContext.canvas.nativeCanvas, which does not resolve on this
+ * Compose version (BOM 2024.09.00) — that was the v0.14.1 build
+ * failure. The documented Compose API for canvas text is
+ * TextMeasurer + DrawScope.drawText, used here instead.
  */
+@OptIn(ExperimentalTextApi::class)
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPageText(
+    textMeasurer: TextMeasurer,
     element: TextElement,
-    pageWidthPt: Float
+    pageWidthPt: Float,
+    scaledDensity: Float
 ) {
     if (element.text.isEmpty()) return
-    val family = when (element.fontFamilyName) {
-        TextFonts.SERIF -> "serif"
-        TextFonts.MONO -> "monospace"
-        TextFonts.CURSIVE -> "cursive"
-        else -> "sans-serif"
-    }
-    val style = when {
-        element.bold && element.italic -> Typeface.BOLD_ITALIC
-        element.bold -> Typeface.BOLD
-        element.italic -> Typeface.ITALIC
-        else -> Typeface.NORMAL
-    }
-    val paint = Paint().apply {
-        color = element.colorValue.toInt()
-        textSize = element.fontSizeSp
-        typeface = Typeface.create(family, style)
-        isAntiAlias = true
-        isUnderlineText = element.underline
-        textAlign = Paint.Align.LEFT
-    }
     val wrapWidth = TextGeometry.wrapWidthPt(element, pageWidthPt)
-    val lines = TextGeometry.wrapLines(
-        element.text, wrapWidth, element.fontSizeSp
-    ) { text, _ -> paint.measureText(text) }
-    val ascent = TextMetrics.ascentPt(element)
-    val lineHeight = TextMetrics.lineHeightPt(element)
-    val native = drawContext.canvas.nativeCanvas
-    val left = element.x + element.paddingPt
-    for (i in lines.indices) {
-        val baseline = element.y + element.paddingPt + ascent +
-            i * lineHeight
-        native.drawText(lines[i], left, baseline, paint)
-    }
+    val lineHeightPt = TextMetrics.lineHeightPt(element)
+    val style = TextStyle(
+        color = Color(element.colorValue),
+        fontSize = (element.fontSizeSp / scaledDensity).sp,
+        lineHeight = (lineHeightPt / scaledDensity).sp,
+        fontWeight = if (element.bold) FontWeight.Bold else FontWeight.Normal,
+        fontStyle = if (element.italic) FontStyle.Italic else FontStyle.Normal,
+        fontFamily = fontFamilyFor(element.fontFamilyName),
+        textAlign = TextAlign.Start,
+        textDecoration = if (element.underline) {
+            TextDecoration.Underline
+        } else {
+            TextDecoration.None
+        }
+    )
+    val layout = textMeasurer.measure(
+        text = AnnotatedString(element.text),
+        style = style,
+        constraints = Constraints(
+            maxWidth = wrapWidth.toInt(),
+            maxHeight = Constraints.Infinity
+        )
+    )
+    drawText(
+        layout,
+        topLeft = Offset(
+            element.x + element.paddingPt,
+            element.y + element.paddingPt
+        )
+    )
 }
 
 private fun colorToHex(c: Color): String = String.format(
@@ -371,6 +384,7 @@ private class LayerWork(source: Layer) {
     )
 }
 
+@OptIn(ExperimentalTextApi::class)
 @Composable
 fun EditorScreen(
     initialDoc: NoteDocument,
@@ -420,6 +434,9 @@ fun EditorScreen(
     // The single view transform (v0.14.1): every layer below reads
     // scale and offset from this one object, never from a local copy.
     val pageViewState = remember { PageViewState() }
+    // Measures canvas text layouts (v0.14.2): one measurer for the
+    // whole editor, reused for every box on every frame.
+    val textMeasurer = rememberTextMeasurer()
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current.density
     // sp -> pixels multiplier (density x fontScale). The page-text style
@@ -1468,7 +1485,10 @@ fun EditorScreen(
                         if (!layer.visible) continue
                         for (element in layer.texts) {
                             if (element.id != editingTextId) {
-                                drawPageText(element, pageFormat.widthPt)
+                                drawPageText(
+                                    textMeasurer, element,
+                                    pageFormat.widthPt, scaledDensity
+                                )
                             }
                         }
                     }
