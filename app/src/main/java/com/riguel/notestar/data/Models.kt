@@ -15,7 +15,10 @@ object PenTypes {
 }
 
 /** Page background. Built-in templates; user templates reuse these styles. */
-enum class PageTemplate { BLANK, LINED, DOTTED, PLANNER, LECTURE }
+enum class PageTemplate {
+    BLANK, LINED, DOTTED, PLANNER, LECTURE,
+    THIN_LINE, BOLD_LINE, MINI_CHECK, MID_CHECK, DOT_GRID
+}
 
 /** One point along a stroke, in page coordinates. Pressure is 0..1. */
 data class StrokePoint(
