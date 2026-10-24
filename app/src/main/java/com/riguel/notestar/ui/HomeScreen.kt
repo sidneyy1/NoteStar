@@ -73,12 +73,14 @@ fun HomeScreen(
     onToggleDarkMode: () -> Unit,
     onAccentSelected: (Int) -> Unit,
     onOpen: (NoteMeta) -> Unit,
-    onCreate: (PageTemplate) -> Unit,
+    onCreate: (PageTemplate, String) -> Unit,
     onDelete: (NoteMeta) -> Unit,
     onEditTags: (NoteMeta, List<String>) -> Unit,
     onImportPdf: (InputStream, String) -> Unit
 ) {
     var showTemplatePicker by remember { mutableStateOf(false) }
+    var pendingTemplate by remember { mutableStateOf<PageTemplate?>(null) }
+    var newTitle by remember { mutableStateOf("") }
     var noteToDelete by remember { mutableStateOf<NoteMeta?>(null) }
     var noteForTags by remember { mutableStateOf<NoteMeta?>(null) }
     var selectedTag by remember { mutableStateOf<String?>(null) }
@@ -275,7 +277,8 @@ fun HomeScreen(
                     PageTemplate.entries.forEach { template ->
                         TextButton(onClick = {
                             showTemplatePicker = false
-                            onCreate(template)
+                            pendingTemplate = template
+                            newTitle = ""
                         }) {
                             Text(templateLabel(template))
                         }
@@ -285,6 +288,36 @@ fun HomeScreen(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { showTemplatePicker = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    val templateForTitle = pendingTemplate
+    if (templateForTitle != null) {
+        AlertDialog(
+            onDismissRequest = { pendingTemplate = null },
+            title = { Text("Name your note") },
+            text = {
+                Column {
+                    Text("Template: ${templateLabel(templateForTitle)}")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newTitle,
+                        onValueChange = { newTitle = it },
+                        placeholder = { Text("Untitled") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    onCreate(templateForTitle, newTitle.trim())
+                    pendingTemplate = null
+                }) { Text("Create note") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingTemplate = null }) { Text("Cancel") }
             }
         )
     }
