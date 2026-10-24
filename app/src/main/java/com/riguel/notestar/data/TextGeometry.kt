@@ -54,6 +54,51 @@ object TextGeometry {
         fontSizePt: Float
     ): Float = boxTopPt + paddingPt + ascentRatio * fontSizePt
 
+    /**
+     * Page size in screen pixels at [viewScale] (pixels per point).
+     * The editor's text layer must be exactly this big: it is the page
+     * rectangle in screen space, and the only clip text may ever see.
+     */
+    fun pageSizePx(
+        pageWidthPt: Float,
+        pageHeightPt: Float,
+        viewScale: Float
+    ): Pair<Float, Float> =
+        Pair(pageWidthPt * viewScale, pageHeightPt * viewScale)
+
+    /**
+     * Screen x of a text box's left edge: the shared PageTransform
+     * (uniform scale + pan), nothing else. The stored box is in page
+     * points, so its on-screen left edge is viewOffset + x * viewScale.
+     */
+    fun textScreenLeftPx(
+        xPt: Float,
+        viewScale: Float,
+        viewOffsetXPx: Float
+    ): Float = viewOffsetXPx + xPt * viewScale
+
+    /**
+     * Screen x of a text box's right edge, same transform: left edge +
+     * wrap width in points * viewScale. For a box that runs to the page
+     * edge this is exactly the page's right edge in screen space, so
+     * the box is contained in the page clip at every zoom — it is
+     * never clipped to a smaller rectangle.
+     */
+    fun textScreenRightPx(
+        element: TextElement,
+        pageWidthPt: Float,
+        viewScale: Float,
+        viewOffsetXPx: Float
+    ): Float = viewOffsetXPx +
+        (element.x + wrapWidthPt(element, pageWidthPt)) * viewScale
+
+    /** Screen x of the page clip's right edge, same transform. */
+    fun pageClipRightPx(
+        pageWidthPt: Float,
+        viewScale: Float,
+        viewOffsetXPx: Float
+    ): Float = viewOffsetXPx + pageWidthPt * viewScale
+
     /** Wrap width in points for a box on a page of [pageWidthPt]. */
     fun wrapWidthPt(element: TextElement, pageWidthPt: Float): Float {
         val toEdge = (pageWidthPt - element.x).coerceAtLeast(10f)
