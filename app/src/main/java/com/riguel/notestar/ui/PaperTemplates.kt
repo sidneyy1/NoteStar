@@ -294,18 +294,50 @@ object LegacyPaper {
  * cheap; everything is vector, re-drawn crisply each frame. The pattern
  * is background only: no layer, never erasable.
  */
-fun DrawScope.drawPagePattern(
+/**
+ * One template primitive in page points, shared by the editor and the
+ * PDF exporter. Both renderers draw exactly this list — same color,
+ * same width in points, same spacing/start/margins, each segment once,
+ * all inside (0, 0, pageWidth, pageHeight) — so a ruled line cannot look
+ * heavier in the PDF than on screen by being drawn twice, with a
+ * different width, or with a different color. The editor passes its
+ * visible rect (culling); the exporter passes the whole page rect.
+ */
+data class TemplateLine(
+    val x1: Float, val y1: Float, val x2: Float, val y2: Float,
+    val color: Color, val widthPt: Float
+)
+
+data class TemplateRect(
+    val x: Float, val y: Float, val sizePt: Float,
+    val color: Color, val widthPt: Float
+)
+
+data class TemplateDot(
+    val cx: Float, val cy: Float, val radiusPt: Float, val color: Color
+)
+
+data class TemplateSegments(
+    val lines: List<TemplateLine> = emptyList(),
+    val rects: List<TemplateRect> = emptyList(),
+    val dots: List<TemplateDot> = emptyList()
+)
+
+fun templateSegments(
     template: PageTemplate,
     pageWidth: Float,
     pageHeight: Float,
     visible: androidx.compose.ui.geometry.Rect
-) {
-    if (template == PageTemplate.BLANK) return
+): TemplateSegments {
+    if (template == PageTemplate.BLANK) return TemplateSegments()
     val def = PaperTemplates.def(template)
-    if (def.spacingMm <= 0f) return
+    if (def.spacingMm <= 0f) return TemplateSegments()
     val spacing = def.spacingMm * PaperTemplates.PT_PER_MM
     val widthPt = def.strokeWidthPx * LegacyPaper.UNIT_TO_PT
     val pt = PaperTemplates.PT_PER_MM
+    val lines = mutableListOf<TemplateLine>()
+    val rects = mutableListOf<TemplateRect>()
+    val dots = mutableListOf<TemplateDot>()
 
     fun firstAtOrAfter(start: Float, step: Float, bound: Float): Float {
         var v = start
@@ -325,27 +357,21 @@ fun DrawScope.drawPagePattern(
             val firstLine = if (top > 0f) top else spacing
             var y = firstAtOrAfter(firstLine, spacing, visible.top)
             while (y <= pageHeight && y <= visible.bottom) {
-                drawLine(
-                    def.patternColor,
-                    Offset(0f, y), Offset(pageWidth, y),
-                    strokeWidth = widthPt
+                lines.add(
+                    TemplateLine(0f, y, pageWidth, y, def.patternColor, widthPt)
                 )
                 y += spacing
             }
             if (template == PageTemplate.LINED) {
                 val mx = LegacyPaper.MARGIN_X_MM * pt
-                drawLine(
-                    LegacyPaper.MARGIN_COLOR,
-                    Offset(mx, 0f), Offset(mx, pageHeight),
-                    strokeWidth = widthPt
+                lines.add(
+                    TemplateLine(mx, 0f, mx, pageHeight, LegacyPaper.MARGIN_COLOR, widthPt)
                 )
             }
             if (template == PageTemplate.PLANNER) {
                 val cx = LegacyPaper.PLANNER_COLUMN_MM * pt
-                drawLine(
-                    def.patternColor,
-                    Offset(cx, 0f), Offset(cx, pageHeight),
-                    strokeWidth = widthPt
+                lines.add(
+                    TemplateLine(cx, 0f, cx, pageHeight, def.patternColor, widthPt)
                 )
                 val sizePt = LegacyPaper.CHECKBOX_SIZE_MM * pt
                 val bx = LegacyPaper.CHECKBOX_X_MM * pt
@@ -354,11 +380,8 @@ fun DrawScope.drawPagePattern(
                 while (ry <= pageHeight && ry - lift <= visible.bottom) {
                     val boxTop = ry - lift
                     if (boxTop + sizePt >= visible.top) {
-                        drawRect(
-                            color = LegacyPaper.ACCENT_COLOR,
-                            topLeft = Offset(bx, boxTop),
-                            size = Size(sizePt, sizePt),
-                            style = Stroke(width = widthPt)
+                        rects.add(
+                            TemplateRect(bx, boxTop, sizePt, LegacyPaper.ACCENT_COLOR, widthPt)
                         )
                     }
                     ry += spacing
@@ -371,10 +394,8 @@ fun DrawScope.drawPagePattern(
                     LegacyPaper.LECTURE_HEADER_2_MM
                 )) {
                     val hy = headerMm * pt
-                    drawLine(
-                        LegacyPaper.ACCENT_COLOR,
-                        Offset(fromX, hy), Offset(pageWidth, hy),
-                        strokeWidth = widthPt
+                    lines.add(
+                        TemplateLine(fromX, hy, pageWidth, hy, LegacyPaper.ACCENT_COLOR, widthPt)
                     )
                 }
             }
@@ -383,20 +404,12 @@ fun DrawScope.drawPagePattern(
         PatternKind.GRID -> {
             var x = firstAtOrAfter(spacing, spacing, visible.left)
             while (x < pageWidth && x <= visible.right) {
-                drawLine(
-                    def.patternColor,
-                    Offset(x, 0f), Offset(x, pageHeight),
-                    strokeWidth = widthPt
-                )
+                lines.add(TemplateLine(x, 0f, x, pageHeight, def.patternColor, widthPt))
                 x += spacing
             }
             var y = firstAtOrAfter(spacing, spacing, visible.top)
             while (y < pageHeight && y <= visible.bottom) {
-                drawLine(
-                    def.patternColor,
-                    Offset(0f, y), Offset(pageWidth, y),
-                    strokeWidth = widthPt
-                )
+                lines.add(TemplateLine(0f, y, pageWidth, y, def.patternColor, widthPt))
                 y += spacing
             }
         }
@@ -407,15 +420,43 @@ fun DrawScope.drawPagePattern(
             while (gx < pageWidth && gx <= visible.right) {
                 var gy = firstAtOrAfter(spacing, spacing, visible.top)
                 while (gy < pageHeight && gy <= visible.bottom) {
-                    drawCircle(
-                        color = def.patternColor,
-                        radius = radius,
-                        center = Offset(gx, gy)
-                    )
+                    dots.add(TemplateDot(gx, gy, radius, def.patternColor))
                     gy += spacing
                 }
                 gx += spacing
             }
         }
+    }
+    return TemplateSegments(lines, rects, dots)
+}
+
+fun DrawScope.drawPagePattern(
+    template: PageTemplate,
+    pageWidth: Float,
+    pageHeight: Float,
+    visible: androidx.compose.ui.geometry.Rect
+) {
+    val segments = templateSegments(template, pageWidth, pageHeight, visible)
+    for (line in segments.lines) {
+        drawLine(
+            line.color,
+            Offset(line.x1, line.y1), Offset(line.x2, line.y2),
+            strokeWidth = line.widthPt
+        )
+    }
+    for (rect in segments.rects) {
+        drawRect(
+            color = rect.color,
+            topLeft = Offset(rect.x, rect.y),
+            size = Size(rect.sizePt, rect.sizePt),
+            style = Stroke(width = rect.widthPt)
+        )
+    }
+    for (dot in segments.dots) {
+        drawCircle(
+            color = dot.color,
+            radius = dot.radiusPt,
+            center = Offset(dot.cx, dot.cy)
+        )
     }
 }
