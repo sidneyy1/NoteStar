@@ -2,6 +2,7 @@ package com.riguel.notestar.data
 
 import android.content.Context
 import androidx.compose.ui.graphics.Color
+import com.riguel.notestar.ui.LegacyPaper
 import com.riguel.notestar.ui.PaperTemplates
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
@@ -423,8 +424,8 @@ object AnnotationRenderer {
         when (def.kind.name) {
             "LINES" -> {
                 setColor(stream, c, stroke = true)
-                stream.setLineWidth(def.strokeWidthPx)
-                var y = top + spacing
+                stream.setLineWidth(def.strokeWidthPx * LegacyPaper.UNIT_TO_PT)
+                var y = if (top > 0f) top else spacing
                 while (y < heightUnits) {
                     stream.moveTo(0f, y)
                     stream.lineTo(widthUnits, y)
@@ -432,17 +433,50 @@ object AnnotationRenderer {
                     y += spacing
                 }
                 if (template == PageTemplate.LINED) {
-                    // The editor's margin line, 1 inch from the left.
-                    val mx = 25.4f * unitsPerMm
-                    setColor(stream, Color(0xFFE57373), stroke = true)
+                    // The editor's margin line (shared LegacyPaper value).
+                    val mx = LegacyPaper.MARGIN_X_MM * unitsPerMm
+                    setColor(stream, Color(0xFFF8BBD0), stroke = true)
                     stream.moveTo(mx, 0f)
                     stream.lineTo(mx, heightUnits)
                     stream.stroke()
                 }
+                if (template == PageTemplate.PLANNER) {
+                    // Time column + checkboxes, same geometry as the
+                    // editor's page-space generator (LegacyPaper).
+                    val cx = LegacyPaper.PLANNER_COLUMN_MM * unitsPerMm
+                    setColor(stream, c, stroke = true)
+                    stream.moveTo(cx, 0f)
+                    stream.lineTo(cx, heightUnits)
+                    stream.stroke()
+                    val boxSize = LegacyPaper.CHECKBOX_SIZE_MM * unitsPerMm
+                    val bx = LegacyPaper.CHECKBOX_X_MM * unitsPerMm
+                    val lift = LegacyPaper.CHECKBOX_LIFT_MM * unitsPerMm
+                    setColor(stream, Color(0xFF90CAF9), stroke = true)
+                    var ry = if (top > 0f) top else spacing
+                    while (ry < heightUnits) {
+                        stream.addRect(bx, ry - lift, boxSize, boxSize)
+                        stream.stroke()
+                        ry += spacing
+                    }
+                }
+                if (template == PageTemplate.LECTURE) {
+                    // Header rules, same LegacyPaper geometry as the editor.
+                    val fromX = LegacyPaper.LECTURE_HEADER_X_MM * unitsPerMm
+                    setColor(stream, Color(0xFF90CAF9), stroke = true)
+                    for (headerMm in listOf(
+                        LegacyPaper.LECTURE_HEADER_1_MM,
+                        LegacyPaper.LECTURE_HEADER_2_MM
+                    )) {
+                        val hy = headerMm * unitsPerMm
+                        stream.moveTo(fromX, hy)
+                        stream.lineTo(widthUnits, hy)
+                        stream.stroke()
+                    }
+                }
             }
             "GRID" -> {
                 setColor(stream, c, stroke = true)
-                stream.setLineWidth(def.strokeWidthPx)
+                stream.setLineWidth(def.strokeWidthPx * LegacyPaper.UNIT_TO_PT)
                 var x = spacing
                 while (x < widthUnits) {
                     stream.moveTo(x, 0f)
@@ -460,7 +494,7 @@ object AnnotationRenderer {
             }
             "DOTS" -> {
                 setColor(stream, c, stroke = false)
-                val r = def.strokeWidthPx
+                val r = def.strokeWidthPx * LegacyPaper.UNIT_TO_PT
                 var y = spacing
                 while (y < heightUnits) {
                     var x = spacing
