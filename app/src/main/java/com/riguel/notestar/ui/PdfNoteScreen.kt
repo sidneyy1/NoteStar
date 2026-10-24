@@ -130,6 +130,7 @@ import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PenTypes
 import com.riguel.notestar.data.ToolPrefs
+import com.riguel.notestar.data.presetsForTool
 import com.riguel.notestar.data.StrokeGeometry
 import com.riguel.notestar.data.StrokePoint
 import com.riguel.notestar.data.TextElement
@@ -1032,6 +1033,7 @@ fun PdfNoteScreen(
                                 Tool.TEXT -> 6f..90f
                                 else -> sizeRangeFor(tool, penType)
                             },
+                            presets = presetsForTool(tool, penType),
                             sizeUnit = "px",
                             previewKind = when (tool) {
                                 Tool.HIGHLIGHTER -> PreviewKind.HIGHLIGHTER
