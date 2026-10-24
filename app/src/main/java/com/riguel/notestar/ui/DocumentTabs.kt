@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Layers
@@ -202,7 +203,8 @@ fun EditorToolbar(
     adjustActive: Boolean = false,
     onRename: () -> Unit,
     onSave: () -> Unit,
-    onEnterPip: () -> Unit
+    onEnterPip: () -> Unit,
+    onExcerpt: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     Row(
@@ -256,6 +258,18 @@ fun EditorToolbar(
                     },
                     leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) }
                 )
+                if (onExcerpt != null) {
+                    DropdownMenuItem(
+                        text = { Text("Save page as new note") },
+                        onClick = {
+                            showMenu = false
+                            onExcerpt()
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.ContentCut, contentDescription = null)
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Picture in picture") },
                     onClick = {
