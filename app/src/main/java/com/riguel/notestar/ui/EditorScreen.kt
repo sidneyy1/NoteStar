@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
@@ -415,6 +416,13 @@ fun EditorScreen(
         if (editingTextId != null) focusRequester.requestFocus()
     }
 
+    // Auto-save when leaving the note.
+    BackHandler {
+        commitEditing()
+        onSave(buildDocument())
+        onBack()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         if (chromeVisible) {
             // Header
@@ -424,7 +432,11 @@ fun EditorScreen(
                     .padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = {
+                    commitEditing()
+                    onSave(buildDocument())
+                    onBack()
+                }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
                 Text(
