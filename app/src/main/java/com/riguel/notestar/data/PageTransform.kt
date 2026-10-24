@@ -1,5 +1,8 @@
 package com.riguel.notestar.data
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 
 /**
@@ -18,4 +21,25 @@ object PageTransform {
 
     fun toPage(screen: Offset, scale: Float, offset: Offset): Offset =
         Offset((screen.x - offset.x) / scale, (screen.y - offset.y) / scale)
+}
+
+/**
+ * The single source of truth for the normal-note editor's view (v0.14.1):
+ * one matrix M = translate(offset) x scale(scale), owned here and read by
+ * every layer — paper template, highlights, ink, canvas text, selection
+ * frame, handles and the editing field. No layer keeps its own copy of
+ * zoom or pan, and no layer recomputes a transform from zoom alone: a
+ * pinch changes scale AND offset together (focal-point pan), and every
+ * reader sees both, in the same frame, because both are state on this
+ * one object. Screen = M(page) = offset + page * scale; page = M^-1.
+ */
+class PageViewState {
+    var scale by mutableStateOf(1f)
+    var offset by mutableStateOf(Offset.Zero)
+
+    fun toScreen(page: Offset): Offset =
+        PageTransform.toScreen(page, scale, offset)
+
+    fun toPage(screen: Offset): Offset =
+        PageTransform.toPage(screen, scale, offset)
 }
