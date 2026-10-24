@@ -18,6 +18,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -68,6 +70,7 @@ import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Gesture
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Layers
@@ -102,6 +105,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
@@ -122,6 +126,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.StrokeCap
@@ -147,8 +152,17 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
+import com.riguel.notestar.data.BoxGeom
 import com.riguel.notestar.data.EditorMode
 import com.riguel.notestar.data.Layer
+import com.riguel.notestar.data.clampVisibleCoord
+import com.riguel.notestar.data.dragPreviewCoord
+import com.riguel.notestar.data.horizontalGuides
+import com.riguel.notestar.data.resizeLeftPreview
+import com.riguel.notestar.data.resizeRightPreview
+import com.riguel.notestar.data.snapAxisCoord
+import com.riguel.notestar.data.verticalGuides
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.Page
 import com.riguel.notestar.data.PageFormat
@@ -175,6 +189,8 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
 
 private fun fontFamilyFor(name: String): FontFamily = when (name) {
     TextFonts.SERIF -> FontFamily.Serif
@@ -328,6 +344,27 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawPageText(
     )
 }
 
+/**
+ * One undoable action (v0.15.4). Strokes were the only undoable
+ * thing before, and the old undo button just popped the layer's
+ * last stroke; text moves now record here too, so one undo step
+ * restores exactly one drag's (or one nudge burst's) previous
+ * geometry. Width is stored because a resize changes it alongside x.
+ */
+private sealed interface EditorUndo {
+    data class Stroke(val layerId: String, val stroke: NoteStroke) : EditorUndo
+    data class TextGeom(
+        val layerId: String,
+        val textId: String,
+        val beforeX: Float,
+        val beforeY: Float,
+        val beforeWidth: Float?,
+        val afterX: Float,
+        val afterY: Float,
+        val afterWidth: Float?
+    ) : EditorUndo
+}
+
 /** Editable working copy of a [Layer] while its page is open. */
 private class LayerWork(source: Layer) {
     val id: String = source.id
@@ -375,22 +412,47 @@ fun EditorScreen(
     var activeLayerId by remember { mutableStateOf<String?>(null) }
     var selectedTextId by remember { mutableStateOf<String?>(null) }
     var editingTextId by remember { mutableStateOf<String?>(null) }
-    // Transient (never stored until commit) state for an explicit
-    // Select-mode move/resize drag on the selected text box. The
-    // stored element is written exactly once, at drag end, via
-    // TextGeometry.moveCommit/resizeCommit; while dragging, only
-    // these values change, so a pinch, zoom, pan or tab switch in
-    // the middle of a drag can never write a half-moved position.
-    // Each is keyed by element id, so a stale drag can never apply
-    // to a different box after the selection changes.
+    // Live-drag state for an explicit Select-mode move/resize on
+    // the selected text box (v0.15.4). The stored element is never
+    // written during a drag: the text, its frame and its handles
+    // all draw from the preview below, and the stored position is
+    // written exactly once, on release. Cancelling (pinch, tool
+    // change, system cancel) just drops the preview — the stored
+    // position was never touched, so there is nothing to restore
+    // and no jump. Each drag is keyed by element id, so a stale
+    // drag can never apply to a different box.
+    //
+    // Move: grab is the page-unit offset between the touch point
+    // (taken when the 8dp slop is passed, so the slop distance is
+    // absorbed and the box does not move at drag start) and the
+    // box's top-left; preview = touchPage - grab, every move event.
     var textDragId by remember { mutableStateOf<String?>(null) }
-    var textDragStart by remember { mutableStateOf(Offset.Zero) }
-    var textDragTotalPx by remember { mutableStateOf(Offset.Zero) }
+    var textDragOrigin by remember { mutableStateOf(Offset.Zero) }
+    var textDragGrab by remember { mutableStateOf(Offset.Zero) }
+    var textDragPreview by remember { mutableStateOf<Offset?>(null) }
+    // Resize: preview (x, widthPt) for the corner being dragged.
     var textResizeId by remember { mutableStateOf<String?>(null) }
     var textResizeStartX by remember { mutableStateOf(0f) }
     var textResizeStartWidth by remember { mutableStateOf(0f) }
-    var textResizeTotalDxPx by remember { mutableStateOf(0f) }
+    var textResizePreview by remember {
+        mutableStateOf<Pair<Float, Float>?>(null)
+    }
     var textResizeLeftCorner by remember { mutableStateOf(false) }
+    var textResizeGrabDx by remember { mutableStateOf(0f) }
+    // Shared by both drags: last touch in page-area screen px (edge
+    // auto-pan reads it) and the guides currently snapped to.
+    var textDragTouch by remember { mutableStateOf<Offset?>(null) }
+    var textDragGuidesV by remember { mutableStateOf<List<Float>>(emptyList()) }
+    var textDragGuidesH by remember { mutableStateOf<List<Float>>(emptyList()) }
+    // Alignment snap, off in Settings ("snap_to_guides", default on).
+    val snapToGuides = remember {
+        toolContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getBoolean("snap_to_guides", true)
+    }
+    // One nudge burst (press to release) records one undo step.
+    var nudgeBurst by remember {
+        mutableStateOf<Triple<String, Float, Float>?>(null)
+    }
     var selectedStroke by remember { mutableStateOf<Pair<String, Int>?>(null) }
     // The single view transform (v0.14.1): every layer below reads
     // scale and offset from this one object, never from a local copy.
@@ -621,9 +683,25 @@ fun EditorScreen(
     }
     val editorScope = rememberCoroutineScope()
 
+    /** Drops any live text-drag preview without writing anything. */
+    fun clearTextDragState() {
+        textDragId = null
+        textDragPreview = null
+        textDragTouch = null
+        textDragGuidesV = emptyList()
+        textDragGuidesH = emptyList()
+        textResizeId = null
+        textResizePreview = null
+    }
+
     /** Discards whatever a half-finished one-finger action changed. */
     fun cancelInProgressGesture() {
         currentPoints = emptyList()
+        // A pinch mid-drag cancels the move/resize: the preview is
+        // dropped and the stored position was never written, so the
+        // box is back where it was. The gesture's own lift handler
+        // is guarded on textDragId, so it cannot commit afterwards.
+        clearTextDragState()
         eraserBackup?.let { (layerId, strokes) ->
             val layer = layersWork.firstOrNull { it.id == layerId }
             if (layer != null) {
@@ -651,6 +729,44 @@ fun EditorScreen(
         delay(2000)
         pagePillFaded = true
     }
+    // Edge auto-pan (v0.15.4): while a text drag is active and the
+    // finger sits within 48dp of a viewport edge, the page pans
+    // slowly that way (~120dp/s). The preview is recomputed from
+    // the current touch through M on every move event, so panning
+    // cannot move the box off the finger — its screen position
+    // depends only on the touch and the grab, never on the offset.
+    // The existing 48dp pan clamp keeps the page on screen.
+    LaunchedEffect(textDragId, textResizeId) {
+        if (textDragId == null && textResizeId == null) {
+            return@LaunchedEffect
+        }
+        while (textDragId != null || textResizeId != null) {
+            val touch = textDragTouch
+            if (touch != null && canvasSize.width > 0) {
+                val edge = 48f * density
+                val speed = 2f * density
+                var dx = 0f
+                var dy = 0f
+                if (touch.x < edge) {
+                    dx = speed
+                } else if (touch.x > canvasSize.width - edge) {
+                    dx = -speed
+                }
+                if (touch.y < edge) {
+                    dy = speed
+                } else if (touch.y > canvasSize.height - edge) {
+                    dy = -speed
+                }
+                if (dx != 0f || dy != 0f) {
+                    pageViewState.offset = clampViewOffset(
+                        pageViewState.offset + Offset(dx, dy),
+                        pageViewState.scale
+                    )
+                }
+            }
+            delay(16)
+        }
+    }
     val pagePillAlpha by animateFloatAsState(
         targetValue = if (pagePillFaded) 0.25f else 1f,
         animationSpec = tween(300),
@@ -672,8 +788,8 @@ fun EditorScreen(
     var newTextUnderline by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
 
-    val undoStack = remember { mutableStateListOf<NoteStroke>() }
-    val redoStack = remember { mutableStateListOf<NoteStroke>() }
+    val undoStack = remember { mutableStateListOf<EditorUndo>() }
+    val redoStack = remember { mutableStateListOf<EditorUndo>() }
 
     fun activeText(): TextElement? {
         val layer = activeLayer() ?: return null
@@ -715,6 +831,146 @@ fun EditorScreen(
                 return
             }
         }
+    }
+
+    fun layerIdOfText(id: String): String? {
+        for (layer in layersWork) {
+            if (layer.texts.any { it.id == id }) return layer.id
+        }
+        return null
+    }
+
+    /**
+     * What the canvas, the frame and the handles all draw for a box:
+     * the live preview while it is being moved/resized, the stored
+     * element otherwise. One function feeds every layer, so text,
+     * frame and handles can never disagree mid-drag.
+     */
+    fun displayText(el: TextElement): TextElement {
+        if (el.id == textDragId) {
+            val preview = textDragPreview ?: return el
+            return el.copy(x = preview.x, y = preview.y)
+        }
+        if (el.id == textResizeId) {
+            val preview = textResizePreview ?: return el
+            return el.copy(x = preview.first, widthPt = preview.second)
+        }
+        return el
+    }
+
+    /** True while this box is drawn from a drag preview. */
+    fun isPreviewing(id: String): Boolean =
+        textDragId == id || textResizeId == id
+
+    /**
+     * Snap a move preview to the nearest guide (page edges/center,
+     * other boxes' edges/centers), then clamp so at least 24dp of
+     * the box stays inside the page. Guides that survive the final
+     * clamp are kept for drawing; a guide the clamp pushed off is
+     * dropped, so a drawn guide is always exact.
+     */
+    fun snapAndClampPreview(
+        raw: Offset,
+        w: Float,
+        h: Float,
+        draggedId: String
+    ): Offset {
+        var snapped = raw
+        var guideV: Float? = null
+        var guideH: Float? = null
+        if (snapToGuides) {
+            val threshold = 6f * density / pageViewState.scale
+            val others = layersWork.flatMap { layer ->
+                if (!layer.visible) {
+                    emptyList()
+                } else {
+                    layer.texts.filter { it.id != draggedId }.map {
+                        BoxGeom(
+                            it.x, it.y,
+                            TextGeometry.wrapWidthPt(it, pageFormat.widthPt),
+                            TextMetrics.boxHeightPt(it, pageFormat.widthPt)
+                        )
+                    }
+                }
+            }
+            val (sx, vg) = snapAxisCoord(
+                raw.x, w,
+                verticalGuides(pageFormat.widthPt, others), threshold
+            )
+            val (sy, hg) = snapAxisCoord(
+                raw.y, h,
+                horizontalGuides(pageFormat.heightPt, others), threshold
+            )
+            snapped = Offset(sx, sy)
+            guideV = vg
+            guideH = hg
+        }
+        val visibleMin = 24f * density / pageViewState.scale
+        val clamped = Offset(
+            clampVisibleCoord(
+                snapped.x, w, pageFormat.widthPt, visibleMin
+            ),
+            clampVisibleCoord(
+                snapped.y, h, pageFormat.heightPt, visibleMin
+            )
+        )
+        if (clamped.x != snapped.x) guideV = null
+        if (clamped.y != snapped.y) guideH = null
+        textDragGuidesV = guideV?.let { listOf(it) } ?: emptyList()
+        textDragGuidesH = guideH?.let { listOf(it) } ?: emptyList()
+        return clamped
+    }
+
+    /** Records one text-geometry undo step; a new action clears redo. */
+    fun pushTextUndo(entry: EditorUndo.TextGeom) {
+        undoStack.add(entry)
+        redoStack.clear()
+    }
+
+    /** Writes a finished move drag: exactly one stored write. */
+    fun commitTextDrag() {
+        val id = textDragId ?: return
+        val preview = textDragPreview ?: return
+        val layerId = layerIdOfText(id) ?: return
+        val el = layersWork.firstNotNullOfOrNull { layer ->
+            layer.texts.firstOrNull { it.id == id }
+        } ?: return
+        updateText(el.copy(x = preview.x, y = preview.y))
+        pushTextUndo(
+            EditorUndo.TextGeom(
+                layerId = layerId,
+                textId = id,
+                beforeX = textDragOrigin.x,
+                beforeY = textDragOrigin.y,
+                beforeWidth = el.widthPt,
+                afterX = preview.x,
+                afterY = preview.y,
+                afterWidth = el.widthPt
+            )
+        )
+    }
+
+    /** Writes a finished resize drag: exactly one stored write. */
+    fun commitTextResize() {
+        val id = textResizeId ?: return
+        val preview = textResizePreview ?: return
+        val layerId = layerIdOfText(id) ?: return
+        val el = layersWork.firstNotNullOfOrNull { layer ->
+            layer.texts.firstOrNull { it.id == id }
+        } ?: return
+        updateText(el.copy(x = preview.first, widthPt = preview.second))
+        pushTextUndo(
+            EditorUndo.TextGeom(
+                layerId = layerId,
+                textId = id,
+                beforeX = textResizeStartX,
+                beforeY = el.y,
+                beforeWidth = textResizeStartWidth,
+                afterX = preview.first,
+                afterY = el.y,
+                afterWidth = preview.second
+            )
+        )
     }
 
     fun commitEditing() {
@@ -1404,21 +1660,27 @@ fun EditorScreen(
                                     } else {
                                         rawPoints
                                     }
-                                    layer.strokes.add(
-                                        NoteStroke(
-                                            points = finalPoints,
-                                            colorValue = inkColor.value,
-                                            thickness = thickness,
-                                            highlighter = tool == Tool.HIGHLIGHTER,
-                                            penType = if (tool == Tool.PEN) {
-                                                penType
-                                            } else {
-                                                PenTypes.PEN
-                                            }
+                                    val finishedStroke = NoteStroke(
+                                        points = finalPoints,
+                                        colorValue = inkColor.value,
+                                        thickness = thickness,
+                                        highlighter = tool == Tool.HIGHLIGHTER,
+                                        penType = if (tool == Tool.PEN) {
+                                            penType
+                                        } else {
+                                            PenTypes.PEN
+                                        }
+                                    )
+                                    layer.strokes.add(finishedStroke)
+                                    // A new stroke is an undoable action
+                                    // too, and it clears redo like any
+                                    // other action after an undo.
+                                    undoStack.add(
+                                        EditorUndo.Stroke(
+                                            layer.id, finishedStroke
                                         )
                                     )
                                     redoStack.clear()
-                                    undoStack.clear()
                                 }
                                 currentPoints = emptyList()
                                 eraserBackup = null
@@ -1521,10 +1783,29 @@ fun EditorScreen(
                         if (!layer.visible) continue
                         for (element in layer.texts) {
                             if (element.id != editingTextId) {
-                                drawPageText(
-                                    textMeasurer, element,
-                                    pageFormat.widthPt, scaledDensity
-                                )
+                                // The dragged/resized box draws from
+                                // its preview (same frame as the
+                                // frame and handles below), at 90%
+                                // opacity while lifted.
+                                val disp = displayText(element)
+                                if (isPreviewing(disp.id)) {
+                                    val base = Color(disp.colorValue)
+                                    val faded = base.copy(
+                                        alpha = base.alpha * 0.9f
+                                    )
+                                    drawPageText(
+                                        textMeasurer,
+                                        disp.copy(
+                                            colorValue = faded.value
+                                        ),
+                                        pageFormat.widthPt, scaledDensity
+                                    )
+                                } else {
+                                    drawPageText(
+                                        textMeasurer, disp,
+                                        pageFormat.widthPt, scaledDensity
+                                    )
+                                }
                             }
                         }
                     }
@@ -1564,20 +1845,108 @@ fun EditorScreen(
                             val el = layer.texts.firstOrNull {
                                 it.id == selectedTextId
                             } ?: continue
+                            val disp = displayText(el)
                             val w = TextGeometry.wrapWidthPt(
-                                el, pageFormat.widthPt
+                                disp, pageFormat.widthPt
                             )
                             val h = TextMetrics.boxHeightPt(
-                                el, pageFormat.widthPt
+                                disp, pageFormat.widthPt
                             )
-                            drawRect(
-                                color = selectionColor,
-                                topLeft = Offset(el.x, el.y),
-                                size = androidx.compose.ui.geometry.Size(w, h),
-                                style = Stroke(
-                                    width = 2f / pageViewState.scale
+                            if (isPreviewing(disp.id)) {
+                                // Ghost of the original place (20%),
+                                // soft shadow under the lifted box,
+                                // and a teal dashed outline at the
+                                // preview — all in page coords, so
+                                // they track the page like the text.
+                                val origW = TextGeometry.wrapWidthPt(
+                                    el, pageFormat.widthPt
                                 )
-                            )
+                                val origH = TextMetrics.boxHeightPt(
+                                    el, pageFormat.widthPt
+                                )
+                                drawRect(
+                                    color = DesignTokens.Accent.copy(
+                                        alpha = 0.2f
+                                    ),
+                                    topLeft = Offset(el.x, el.y),
+                                    size = androidx.compose.ui.geometry.Size(
+                                        origW, origH
+                                    ),
+                                    style = Stroke(
+                                        width = 1f / pageViewState.scale
+                                    )
+                                )
+                                drawRoundRect(
+                                    color = Color.Black.copy(alpha = 0.15f),
+                                    topLeft = Offset(
+                                        disp.x,
+                                        disp.y + 2f * density /
+                                            pageViewState.scale
+                                    ),
+                                    size = androidx.compose.ui.geometry.Size(
+                                        w, h
+                                    ),
+                                    cornerRadius = CornerRadius(
+                                        4f / pageViewState.scale
+                                    )
+                                )
+                                drawRoundRect(
+                                    color = DesignTokens.Accent,
+                                    topLeft = Offset(disp.x, disp.y),
+                                    size = androidx.compose.ui.geometry.Size(
+                                        w, h
+                                    ),
+                                    cornerRadius = CornerRadius(
+                                        4f / pageViewState.scale
+                                    ),
+                                    style = Stroke(
+                                        width = 2f / pageViewState.scale,
+                                        pathEffect = PathEffect
+                                            .dashPathEffect(
+                                                floatArrayOf(
+                                                    8f / pageViewState.scale,
+                                                    6f / pageViewState.scale
+                                                ),
+                                                0f
+                                            )
+                                    )
+                                )
+                                // Alignment guides currently snapped
+                                // to: thin teal lines across the page.
+                                for (gx in textDragGuidesV) {
+                                    drawLine(
+                                        color = DesignTokens.Accent,
+                                        start = Offset(gx, 0f),
+                                        end = Offset(
+                                            gx, pageFormat.heightPt
+                                        ),
+                                        strokeWidth =
+                                            1f / pageViewState.scale
+                                    )
+                                }
+                                for (gy in textDragGuidesH) {
+                                    drawLine(
+                                        color = DesignTokens.Accent,
+                                        start = Offset(0f, gy),
+                                        end = Offset(
+                                            pageFormat.widthPt, gy
+                                        ),
+                                        strokeWidth =
+                                            1f / pageViewState.scale
+                                    )
+                                }
+                            } else {
+                                drawRect(
+                                    color = selectionColor,
+                                    topLeft = Offset(disp.x, disp.y),
+                                    size = androidx.compose.ui.geometry.Size(
+                                        w, h
+                                    ),
+                                    style = Stroke(
+                                        width = 2f / pageViewState.scale
+                                    )
+                                )
+                            }
                             break
                         }
                     }
@@ -1684,7 +2053,11 @@ fun EditorScreen(
                 )
             }
             if (selectedElement != null) {
-                val element = selectedElement
+                // Every position below is the DISPLAY geometry
+                // (preview while dragging, stored otherwise), from
+                // the same M — so the frame, the text and the
+                // handles move as one, in the same frame.
+                val element = displayText(selectedElement)
                 val primary = MaterialTheme.colorScheme.primary
                 val topLeft = pageViewState.toScreen(
                     Offset(element.x, element.y)
@@ -1695,9 +2068,18 @@ fun EditorScreen(
                 val boxHpx = TextMetrics.boxHeightPt(
                     element, pageFormat.widthPt
                 ) * pageViewState.scale
-                // Move handle: top-center of the box, from M. Dragging
-                // it moves the box; the stored position is written
-                // exactly once, at drag end, via moveCommit.
+                // Move handle: top-center of the box, from M.
+                // Live drag (v0.15.4): an 8dp slop tells a tap from
+                // a drag; the grab is taken when the slop is passed,
+                // so the box does not move at drag start; every move
+                // event previews touchPage - grab through M, and the
+                // stored position is written exactly once, on lift.
+                val moveHandleOriginState = rememberUpdatedState(
+                    Offset(
+                        topLeft.x + boxWpx / 2f - 14f * density,
+                        topLeft.y - 7f * density
+                    )
+                )
                 Box(
                     Modifier
                         .offset {
@@ -1711,58 +2093,112 @@ fun EditorScreen(
                         .background(primary, CircleShape)
                         .border(1.dp, Color.White, CircleShape)
                         .pointerInput(element.id) {
-                            detectDragGestures(
-                                onDragStart = {
-                                    textDragId = element.id
-                                    textDragStart = Offset(
-                                        element.x, element.y
-                                    )
-                                    textDragTotalPx = Offset.Zero
-                                },
-                                onDragEnd = {
-                                    val committed =
-                                        TextGeometry.moveCommit(
-                                            textDragStart.x,
-                                            textDragStart.y,
-                                            textDragTotalPx.x,
-                                            textDragTotalPx.y,
-                                            pageViewState.scale
-                                        )
-                                    updateText(
-                                        element.copy(
-                                            x = committed.first,
-                                            y = committed.second
-                                        )
-                                    )
-                                    textDragId = null
-                                    textDragTotalPx = Offset.Zero
-                                },
-                                onDragCancel = {
-                                    textDragId = null
-                                    textDragTotalPx = Offset.Zero
-                                },
-                                onDrag = { change, dragAmount ->
+                            awaitEachGesture {
+                                val down = awaitFirstDown()
+                                val slopPx = 8f * density
+                                var slopTouch: Offset? = null
+                                while (slopTouch == null) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes
+                                        .firstOrNull { it.id == down.id }
+                                        ?: continue
+                                    if (!change.pressed) break
                                     change.consume()
-                                    if (!suppressDrawing) {
-                                        textDragTotalPx += Offset(
-                                            dragAmount.x, dragAmount.y
-                                        )
+                                    if ((change.position - down.position)
+                                            .getDistance() >= slopPx
+                                    ) {
+                                        slopTouch = change.position
                                     }
                                 }
-                            )
+                                // Lift before the slop: a tap, the
+                                // selection is unchanged, no drag.
+                                if (slopTouch == null) {
+                                    return@awaitEachGesture
+                                }
+                                val origin = Offset(
+                                    element.x, element.y
+                                )
+                                val touchPage = pageViewState.toPage(
+                                    moveHandleOriginState.value + slopTouch
+                                )
+                                textDragId = element.id
+                                textDragOrigin = origin
+                                textDragGrab = touchPage - origin
+                                textDragPreview = origin
+                                textDragTouch =
+                                    moveHandleOriginState.value + slopTouch
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes
+                                            .firstOrNull {
+                                                it.id == down.id
+                                            } ?: continue
+                                        if (!change.pressed) {
+                                            // Lift: commit only if a
+                                            // pinch or tool change did
+                                            // not already cancel this
+                                            // drag (cancel clears the
+                                            // id, so this is skipped).
+                                            if (textDragId == element.id &&
+                                                !suppressDrawing
+                                            ) {
+                                                commitTextDrag()
+                                            }
+                                            break
+                                        }
+                                        change.consume()
+                                        if (suppressDrawing) continue
+                                        val handleOrigin =
+                                            moveHandleOriginState.value
+                                        textDragTouch =
+                                            handleOrigin + change.position
+                                        val page = pageViewState.toPage(
+                                            handleOrigin + change.position
+                                        )
+                                        val w = TextGeometry.wrapWidthPt(
+                                            element, pageFormat.widthPt
+                                        )
+                                        val h = TextMetrics.boxHeightPt(
+                                            element, pageFormat.widthPt
+                                        )
+                                        val raw = Offset(
+                                            dragPreviewCoord(
+                                                page.x, textDragGrab.x
+                                            ),
+                                            dragPreviewCoord(
+                                                page.y, textDragGrab.y
+                                            )
+                                        )
+                                        textDragPreview =
+                                            snapAndClampPreview(
+                                                raw, w, h, element.id
+                                            )
+                                    }
+                                } finally {
+                                    // System cancel: drop the preview,
+                                    // never write the stored position.
+                                    clearTextDragState()
+                                }
+                            }
                         }
                         .clickable {}
                 )
-                // Corner resize handles: at M(box corners), fixed size.
-                // Dragging one changes the stored wrap width (left
-                // corners also move x, right edge fixed); written
-                // exactly once, at drag end, via resizeCommit.
+                // Corner resize handles: at M(box corners), fixed
+                // size. Same live-preview, no-jump rule as the move
+                // handle, with the opposite corner as the anchor.
                 listOf(
                     Triple(0f, 0f, true),
                     Triple(boxWpx, 0f, false),
                     Triple(0f, boxHpx, true),
                     Triple(boxWpx, boxHpx, false)
                 ).forEach { (dxPx, dyPx, left) ->
+                    val cornerOriginState = rememberUpdatedState(
+                        Offset(
+                            topLeft.x + dxPx - 12f * density,
+                            topLeft.y + dyPx - 12f * density
+                        )
+                    )
                     Box(
                         Modifier
                             .offset {
@@ -1777,52 +2213,144 @@ fun EditorScreen(
                             .background(primary, CircleShape)
                             .border(1.dp, Color.White, CircleShape)
                             .pointerInput(element.id, left) {
-                                detectDragGestures(
-                                    onDragStart = {
-                                        textResizeId = element.id
-                                        textResizeStartX = element.x
-                                        textResizeStartWidth =
-                                            TextGeometry.wrapWidthPt(
-                                                element,
-                                                pageFormat.widthPt
-                                            )
-                                        textResizeTotalDxPx = 0f
-                                        textResizeLeftCorner = left
-                                    },
-                                    onDragEnd = {
-                                        val committed =
-                                            TextGeometry.resizeCommit(
-                                                textResizeStartX,
-                                                textResizeStartWidth,
-                                                textResizeTotalDxPx,
-                                                pageViewState.scale,
-                                                textResizeLeftCorner,
-                                                pageFormat.widthPt
-                                            )
-                                        updateText(
-                                            element.copy(
-                                                x = committed.first,
-                                                widthPt = committed.second
-                                            )
-                                        )
-                                        textResizeId = null
-                                        textResizeTotalDxPx = 0f
-                                    },
-                                    onDragCancel = {
-                                        textResizeId = null
-                                        textResizeTotalDxPx = 0f
-                                    },
-                                    onDrag = { change, dragAmount ->
+                                awaitEachGesture {
+                                    val down = awaitFirstDown()
+                                    val slopPx = 8f * density
+                                    var slopTouch: Offset? = null
+                                    while (slopTouch == null) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes
+                                            .firstOrNull {
+                                                it.id == down.id
+                                            } ?: continue
+                                        if (!change.pressed) break
                                         change.consume()
-                                        if (!suppressDrawing) {
-                                            textResizeTotalDxPx +=
-                                                dragAmount.x
+                                        if ((change.position - down.position)
+                                                .getDistance() >= slopPx
+                                        ) {
+                                            slopTouch = change.position
                                         }
                                     }
-                                )
+                                    if (slopTouch == null) {
+                                        return@awaitEachGesture
+                                    }
+                                    val startX = element.x
+                                    val startWidth =
+                                        TextGeometry.wrapWidthPt(
+                                            element, pageFormat.widthPt
+                                        )
+                                    val touchPageX = pageViewState.toPage(
+                                        cornerOriginState.value + slopTouch
+                                    ).x
+                                    val draggedEdge = if (left) {
+                                        startX
+                                    } else {
+                                        startX + startWidth
+                                    }
+                                    textResizeId = element.id
+                                    textResizeStartX = startX
+                                    textResizeStartWidth = startWidth
+                                    textResizeLeftCorner = left
+                                    textResizeGrabDx =
+                                        touchPageX - draggedEdge
+                                    textResizePreview =
+                                        startX to startWidth
+                                    textDragTouch =
+                                        cornerOriginState.value + slopTouch
+                                    try {
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val change = event.changes
+                                                .firstOrNull {
+                                                    it.id == down.id
+                                                } ?: continue
+                                            if (!change.pressed) {
+                                                if (textResizeId ==
+                                                    element.id &&
+                                                    !suppressDrawing
+                                                ) {
+                                                    commitTextResize()
+                                                }
+                                                break
+                                            }
+                                            change.consume()
+                                            if (suppressDrawing) continue
+                                            val cornerOrigin =
+                                                cornerOriginState.value
+                                            textDragTouch =
+                                                cornerOrigin +
+                                                    change.position
+                                            val pageX = pageViewState.toPage(
+                                                cornerOrigin +
+                                                    change.position
+                                            ).x
+                                            val edge = pageX -
+                                                textResizeGrabDx
+                                            textResizePreview = if (left) {
+                                                resizeLeftPreview(
+                                                    startX, startWidth,
+                                                    edge,
+                                                    pageFormat.widthPt
+                                                )
+                                            } else {
+                                                startX to resizeRightPreview(
+                                                    startX, startWidth,
+                                                    edge,
+                                                    pageFormat.widthPt
+                                                )
+                                            }
+                                        }
+                                    } finally {
+                                        clearTextDragState()
+                                    }
+                                }
                             }
                             .clickable {}
                     )
+                }
+                // Position label while dragging (page units, 1dp).
+                // Non-interactive: it never consumes touches.
+                val dragLabel: String? =
+                    if (textDragId == element.id &&
+                        textDragPreview != null
+                    ) {
+                        val p = textDragPreview!!
+                        "%.1f, %.1f pt".format(
+                            Locale.US, p.x, p.y
+                        )
+                    } else if (textResizeId == element.id &&
+                        textResizePreview != null
+                    ) {
+                        "%.1f pt".format(
+                            Locale.US, textResizePreview!!.second
+                        )
+                    } else {
+                        null
+                    }
+                if (dragLabel != null) {
+                    Box(
+                        modifier = Modifier
+                            .offset {
+                                IntOffset(
+                                    topLeft.x.roundToInt(),
+                                    (topLeft.y - 30f * density)
+                                        .roundToInt()
+                                )
+                            }
+                            .background(
+                                Color.Black.copy(alpha = 0.7f),
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(
+                                horizontal = 8.dp, vertical = 4.dp
+                            )
+                    ) {
+                        Text(
+                            text = dragLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White
+                        )
+                    }
                 }
             }
 
@@ -2196,6 +2724,125 @@ fun EditorScreen(
                                         )
                                     }
                                 }
+                                // Nudge pad (v0.15.4): 1 pt per tap,
+                                // long-press repeats. One press is one
+                                // undo step, recorded on release. Only
+                                // for text on an unlocked layer (a
+                                // locked layer's text cannot be
+                                // selected, so this is just a guard).
+                                val nudgeLayer = selectedTextId?.let { id ->
+                                    layersWork.firstOrNull { layer ->
+                                        !layer.locked && layer.texts.any {
+                                            it.id == id
+                                        }
+                                    }
+                                }
+                                if (nudgeLayer != null) {
+                                    fun nudgeBy(dx: Float, dy: Float) {
+                                        val id = selectedTextId ?: return
+                                        val el = layersWork
+                                            .firstNotNullOfOrNull { layer ->
+                                                layer.texts.firstOrNull {
+                                                    it.id == id
+                                                }
+                                            } ?: return
+                                        updateText(
+                                            el.copy(
+                                                x = el.x + dx,
+                                                y = el.y + dy
+                                            )
+                                        )
+                                    }
+                                    fun nudgeDown() {
+                                        val id = selectedTextId ?: return
+                                        val el = layersWork
+                                            .firstNotNullOfOrNull { layer ->
+                                                layer.texts.firstOrNull {
+                                                    it.id == id
+                                                }
+                                            } ?: return
+                                        nudgeBurst = Triple(id, el.x, el.y)
+                                    }
+                                    fun nudgeUp() {
+                                        val burst = nudgeBurst
+                                        nudgeBurst = null
+                                        if (burst == null) return
+                                        val el = layersWork
+                                            .firstNotNullOfOrNull { layer ->
+                                                layer.texts.firstOrNull {
+                                                    it.id == burst.first
+                                                }
+                                            } ?: return
+                                        if (el.x != burst.second ||
+                                            el.y != burst.third
+                                        ) {
+                                            val layerId =
+                                                layerIdOfText(burst.first)
+                                                    ?: return
+                                            pushTextUndo(
+                                                EditorUndo.TextGeom(
+                                                    layerId = layerId,
+                                                    textId = burst.first,
+                                                    beforeX = burst.second,
+                                                    beforeY = burst.third,
+                                                    beforeWidth = el.widthPt,
+                                                    afterX = el.x,
+                                                    afterY = el.y,
+                                                    afterWidth = el.widthPt
+                                                )
+                                            )
+                                        }
+                                    }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(
+                                                horizontal = 8.dp,
+                                                vertical = 2.dp
+                                            ),
+                                        verticalAlignment =
+                                            Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Nudge (1 pt)",
+                                            style = MaterialTheme.typography
+                                                .bodySmall,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        NudgeButton(
+                                            icon = Icons.Filled
+                                                .KeyboardArrowLeft,
+                                            description = "Nudge left",
+                                            onDown = { nudgeDown() },
+                                            onStep = { nudgeBy(-1f, 0f) },
+                                            onUp = { nudgeUp() }
+                                        )
+                                        NudgeButton(
+                                            icon = Icons.Filled
+                                                .KeyboardArrowUp,
+                                            description = "Nudge up",
+                                            onDown = { nudgeDown() },
+                                            onStep = { nudgeBy(0f, -1f) },
+                                            onUp = { nudgeUp() }
+                                        )
+                                        NudgeButton(
+                                            icon = Icons.Filled
+                                                .KeyboardArrowDown,
+                                            description = "Nudge down",
+                                            onDown = { nudgeDown() },
+                                            onStep = { nudgeBy(0f, 1f) },
+                                            onUp = { nudgeUp() }
+                                        )
+                                        NudgeButton(
+                                            icon = Icons.Filled
+                                                .KeyboardArrowRight,
+                                            description = "Nudge right",
+                                            onDown = { nudgeDown() },
+                                            onStep = { nudgeBy(1f, 0f) },
+                                            onUp = { nudgeUp() }
+                                        )
+                                    }
+                                }
                             }
                         }
                     )
@@ -2264,15 +2911,81 @@ fun EditorScreen(
                                 popoverOpen = true
                             },
                             onUndo = {
-                                val layer = activeLayer()
-                                if (layer != null && !layer.locked && layer.strokes.isNotEmpty()) {
-                                    redoStack.add(layer.strokes.removeAt(layer.strokes.lastIndex))
+                                // One step, most recent action first:
+                                // a stroke comes off its layer, a text
+                                // move/resize returns to its previous
+                                // geometry. A locked or missing layer
+                                // drops its entry instead of editing
+                                // through the lock.
+                                val entry = undoStack.removeLastOrNull()
+                                    ?: return@FloatingToolbar
+                                when (entry) {
+                                    is EditorUndo.Stroke -> {
+                                        val layer = layersWork.firstOrNull {
+                                            it.id == entry.layerId
+                                        }
+                                        if (layer != null && !layer.locked &&
+                                            layer.strokes.contains(entry.stroke)
+                                        ) {
+                                            layer.strokes.remove(entry.stroke)
+                                            redoStack.add(entry)
+                                        }
+                                    }
+                                    is EditorUndo.TextGeom -> {
+                                        val layer = layersWork.firstOrNull {
+                                            it.id == entry.layerId
+                                        }
+                                        val el = layer?.texts?.firstOrNull {
+                                            it.id == entry.textId
+                                        }
+                                        if (layer != null && !layer.locked &&
+                                            el != null
+                                        ) {
+                                            updateText(
+                                                el.copy(
+                                                    x = entry.beforeX,
+                                                    y = entry.beforeY,
+                                                    widthPt = entry.beforeWidth
+                                                )
+                                            )
+                                            redoStack.add(entry)
+                                        }
+                                    }
                                 }
                             },
                             onRedo = {
-                                val layer = activeLayer()
-                                if (layer != null && !layer.locked && redoStack.isNotEmpty()) {
-                                    layer.strokes.add(redoStack.removeAt(redoStack.lastIndex))
+                                val entry = redoStack.removeLastOrNull()
+                                    ?: return@FloatingToolbar
+                                when (entry) {
+                                    is EditorUndo.Stroke -> {
+                                        val layer = layersWork.firstOrNull {
+                                            it.id == entry.layerId
+                                        }
+                                        if (layer != null && !layer.locked) {
+                                            layer.strokes.add(entry.stroke)
+                                            undoStack.add(entry)
+                                        }
+                                    }
+                                    is EditorUndo.TextGeom -> {
+                                        val layer = layersWork.firstOrNull {
+                                            it.id == entry.layerId
+                                        }
+                                        val el = layer?.texts?.firstOrNull {
+                                            it.id == entry.textId
+                                        }
+                                        if (layer != null && !layer.locked &&
+                                            el != null
+                                        ) {
+                                            updateText(
+                                                el.copy(
+                                                    x = entry.afterX,
+                                                    y = entry.afterY,
+                                                    widthPt = entry.afterWidth
+                                                )
+                                            )
+                                            undoStack.add(entry)
+                                        }
+                                    }
                                 }
                             },
                             onDelete = {
@@ -2611,6 +3324,68 @@ internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawStrokeSmooth(s
             end = Offset(b.x, b.y),
             strokeWidth = width.coerceAtLeast(0.5f),
             cap = StrokeCap.Round
+        )
+    }
+}
+
+/**
+ * A button that fires once per tap and repeats while held (400ms
+ * delay, then every 90ms). onDown/onUp bracket one press, so the
+ * caller can record one undo step per burst. Used by the Select
+ * nudge pad (v0.15.4).
+ */
+@Composable
+private fun NudgeButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    onDown: () -> Unit,
+    onStep: () -> Unit,
+    onUp: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(DesignTokens.AccentTint)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    try {
+                        onDown()
+                        onStep()
+                        var nextRepeat = System.currentTimeMillis() + 400
+                        while (true) {
+                            val timeout = (nextRepeat -
+                                System.currentTimeMillis()
+                                ).coerceAtLeast(0)
+                            val event = withTimeoutOrNull(timeout) {
+                                awaitPointerEvent()
+                            }
+                            if (event == null) {
+                                onStep()
+                                nextRepeat =
+                                    System.currentTimeMillis() + 90
+                                continue
+                            }
+                            val change = event.changes.firstOrNull {
+                                it.id == down.id
+                            } ?: continue
+                            if (!change.pressed) break
+                            change.consume()
+                        }
+                    } finally {
+                        onUp()
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = description,
+            tint = DesignTokens.Accent
         )
     }
 }
