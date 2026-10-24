@@ -3,6 +3,7 @@ package com.riguel.notestar
 import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,10 +13,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -29,7 +33,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import com.riguel.notestar.data.BackupManager
+import com.riguel.notestar.data.ExportCancelled
+import com.riguel.notestar.data.ExportException
+import com.riguel.notestar.data.ExportOptions
+import com.riguel.notestar.data.PdfExportService
 import com.riguel.notestar.data.NoteDocument
 import com.riguel.notestar.data.NoteStorage
 import com.riguel.notestar.data.Page
@@ -37,9 +46,15 @@ import com.riguel.notestar.data.PageTemplate
 import com.riguel.notestar.ui.CreateNoteScreen
 import com.riguel.notestar.ui.DocTab
 import com.riguel.notestar.ui.EditorScreen
+import com.riguel.notestar.ui.ExportDoneDialog
+import com.riguel.notestar.ui.ExportOptionsSheet
+import com.riguel.notestar.ui.ExportProgressDialog
 import com.riguel.notestar.ui.HomeScreen
 import com.riguel.notestar.ui.PdfNoteScreen
+import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Accent choices for the custom theme; the design accent is the first one. */
 val ACCENT_COLORS = listOf(
@@ -121,6 +136,100 @@ fun NoteStarApp(
 
     fun notify(message: String) {
         scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    // ---- Export as PDF ----
+    var exportDoc by remember { mutableStateOf<NoteDocument?>(null) }
+    var exportCurrentPage by remember { mutableStateOf(-1) }
+    var exportProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var exportResult by remember { mutableStateOf<File?>(null) }
+    var exportError by remember { mutableStateOf<String?>(null) }
+    var exportCancelledFlag by remember { mutableStateOf(false) }
+
+    fun startExport(doc: NoteDocument, currentPage: Int) {
+        exportCurrentPage = currentPage
+        exportDoc = doc
+    }
+
+    fun runExport(options: ExportOptions) {
+        val doc = exportDoc ?: return
+        exportCancelledFlag = false
+        exportProgress = 0 to 1
+        scope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    PdfExportService.export(
+                        context = context,
+                        doc = doc,
+                        options = options,
+                        currentPage = exportCurrentPage,
+                        isCancelled = { exportCancelledFlag },
+                        onProgress = { done, total ->
+                            exportProgress = done to total
+                        }
+                    )
+                }
+                exportProgress = null
+                exportDoc = null
+                exportResult = file
+            } catch (e: ExportCancelled) {
+                exportProgress = null
+                exportDoc = null
+            } catch (e: ExportException) {
+                exportProgress = null
+                exportDoc = null
+                exportError = e.message ?: "Export failed. Tap to retry"
+            } catch (e: java.io.IOException) {
+                exportProgress = null
+                exportDoc = null
+                exportError =
+                    "Export failed — the file could not be written (storage may be full)."
+            } catch (e: Exception) {
+                exportProgress = null
+                exportDoc = null
+                exportError = "Export failed. Tap to retry"
+            }
+        }
+    }
+
+    fun shareExport(file: File) {
+        val uri = FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/pdf"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share PDF"))
+    }
+
+    fun openExport(file: File) {
+        val uri = FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/pdf")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { context.startActivity(intent) }
+            .onFailure { notify("No PDF viewer app found") }
+    }
+
+    val exportSaveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri ->
+        val file = exportResult
+        if (uri != null && file != null) {
+            scope.launch(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        file.inputStream().use { input -> input.copyTo(out) }
+                    }
+                }
+            }
+            notify("Saved ${file.name}")
+        }
     }
 
     fun openInTab(doc: NoteDocument) {
@@ -218,6 +327,11 @@ fun NoteStarApp(
                                     refresh++
                                 },
                                 onSave = { updated -> saveDoc(updated, "Annotations saved") },
+                                onExportRequest = { page ->
+                                    NoteStorage.loadNote(context, activeDoc.id)?.let {
+                                        startExport(it, page)
+                                    }
+                                },
                                 onEnterPip = onEnterPip,
                                 tabs = docTabs,
                                 onTabSelect = { id -> activeTabId = id },
@@ -231,6 +345,11 @@ fun NoteStarApp(
                                     refresh++
                                 },
                                 onSave = { updated -> saveDoc(updated, "Note saved") },
+                                onExportRequest = { page ->
+                                    NoteStorage.loadNote(context, activeDoc.id)?.let {
+                                        startExport(it, page)
+                                    }
+                                },
                                 onExcerptPage = { excerptTitle, page ->
                                     val now = System.currentTimeMillis()
                                     val excerpt = NoteDocument(
@@ -300,6 +419,11 @@ fun NoteStarApp(
                                 refresh++
                             }
                         },
+                        onExportNote = { meta ->
+                            NoteStorage.loadNote(context, meta.id)?.let {
+                                startExport(it, -1)
+                            }
+                        },
                         onImportPdf = { input, displayName ->
                             val imported = NoteStorage.importPdf(context, input, displayName)
                             if (imported != null) {
@@ -331,6 +455,44 @@ fun NoteStarApp(
                     )
                 }
             }
+        }
+
+        // ---- Export as PDF UI ----
+        val sheetDoc = exportDoc
+        if (sheetDoc != null && exportProgress == null && exportResult == null) {
+            ExportOptionsSheet(
+                docTitle = sheetDoc.title.ifBlank { "Untitled" },
+                pageCount = sheetDoc.pdf?.pageCount ?: sheetDoc.pages.size,
+                hasCurrentPage = exportCurrentPage >= 0,
+                onDismiss = { exportDoc = null },
+                onExport = { options -> runExport(options) }
+            )
+        }
+        exportProgress?.let { (done, total) ->
+            ExportProgressDialog(
+                done = done,
+                total = total,
+                onCancel = { exportCancelledFlag = true }
+            )
+        }
+        exportResult?.let { file ->
+            ExportDoneDialog(
+                fileName = file.name,
+                onShare = { shareExport(file) },
+                onOpen = { openExport(file) },
+                onSaveToDevice = { exportSaveLauncher.launch(file.name) },
+                onDismiss = { exportResult = null }
+            )
+        }
+        exportError?.let { message ->
+            AlertDialog(
+                onDismissRequest = { exportError = null },
+                title = { Text("Export as PDF") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { exportError = null }) { Text("OK") }
+                }
+            )
         }
     }
 }
