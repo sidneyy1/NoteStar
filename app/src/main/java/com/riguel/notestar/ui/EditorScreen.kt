@@ -252,6 +252,7 @@ fun EditorScreen(
     onBack: () -> Unit,
     onSave: (NoteDocument) -> Unit,
     onExcerptPage: (String, Page) -> Unit,
+    onExportRequest: (Int) -> Unit,
     onEnterPip: () -> Unit,
     tabs: List<DocTab>,
     onTabSelect: (String) -> Unit,
@@ -546,6 +547,11 @@ fun EditorScreen(
                 onExcerpt = {
                     commitEditing()
                     onExcerptPage(title.ifBlank { "Untitled" }, snapshotCurrentPage())
+                },
+                onExport = {
+                    commitEditing()
+                    onSave(buildDocument())
+                    onExportRequest(currentPageIndex)
                 }
             )
 
