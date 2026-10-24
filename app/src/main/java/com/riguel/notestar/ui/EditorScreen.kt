@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatBold
 import androidx.compose.material.icons.filled.FormatColorFill
 import androidx.compose.material.icons.filled.FormatItalic
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Palette
@@ -60,6 +62,8 @@ import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -95,6 +99,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.IntOffset
@@ -299,6 +304,9 @@ fun EditorScreen(
     var paletteVisible by remember { mutableStateOf(!compact) }
     var showLayers by remember { mutableStateOf(false) }
     var showOutline by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+    var showRename by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
     var newTextSize by remember { mutableStateOf(20f) }
     var newTextBold by remember { mutableStateOf(false) }
     var newTextItalic by remember { mutableStateOf(false) }
@@ -419,19 +427,50 @@ fun EditorScreen(
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    placeholder = { Text("Untitled") },
-                    singleLine = true,
+                Text(
+                    text = title.ifBlank { "Untitled" },
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onEnterPip, modifier = Modifier.size(btnSize)) {
-                    Icon(
-                        Icons.Filled.PictureInPicture,
-                        contentDescription = "Picture in picture",
-                        modifier = Modifier.size(iconSize)
-                    )
+                Box {
+                    IconButton(
+                        onClick = { showMenu = true },
+                        modifier = Modifier.size(btnSize)
+                    ) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "Menu",
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Rename") },
+                            onClick = {
+                                showMenu = false
+                                renameText = title
+                                showRename = true
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Edit, contentDescription = null)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Picture in picture") },
+                            onClick = {
+                                showMenu = false
+                                onEnterPip()
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.PictureInPicture, contentDescription = null)
+                            }
+                        )
+                    }
                 }
                 IconButton(
                     onClick = {
@@ -1283,6 +1322,33 @@ fun EditorScreen(
                 )
             }
         }
+    }
+
+    if (showRename) {
+        AlertDialog(
+            onDismissRequest = { showRename = false },
+            title = { Text("Rename note") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    placeholder = { Text("Untitled") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    title = renameText
+                    showRename = false
+                    commitEditing()
+                    onSave(buildDocument())
+                }) { Text("Rename") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRename = false }) { Text("Cancel") }
+            }
+        )
     }
 
     if (showLayers) {
