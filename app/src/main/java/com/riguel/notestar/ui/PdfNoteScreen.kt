@@ -721,7 +721,7 @@ fun PdfNoteScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(Color(0xFFEEEEEE))
+                .background(DesignTokens.CanvasBackground)
                 .clipToBounds(),
             contentAlignment = Alignment.Center
         ) {
