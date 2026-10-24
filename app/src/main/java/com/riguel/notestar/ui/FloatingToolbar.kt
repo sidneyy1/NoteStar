@@ -2,6 +2,7 @@ package com.riguel.notestar.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -218,7 +219,8 @@ fun PageIndicatorPill(
     label: String,
     onPrev: () -> Unit,
     onNext: () -> Unit,
-    onAdd: () -> Unit,
+    onAdd: (() -> Unit)? = null,
+    onLabelClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -241,7 +243,12 @@ fun PageIndicatorPill(
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelLarge,
-                color = DesignTokens.TextPrimary
+                color = DesignTokens.TextPrimary,
+                modifier = if (onLabelClick != null) {
+                    Modifier.clickable { onLabelClick() }
+                } else {
+                    Modifier
+                }
             )
             IconButton(onClick = onNext, modifier = Modifier.size(36.dp)) {
                 Icon(
@@ -250,12 +257,14 @@ fun PageIndicatorPill(
                     tint = DesignTokens.IconGray
                 )
             }
-            IconButton(onClick = onAdd, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Filled.Add,
-                    contentDescription = "Add page",
-                    tint = DesignTokens.IconGray
-                )
+            if (onAdd != null) {
+                IconButton(onClick = onAdd, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = "Add page",
+                        tint = DesignTokens.IconGray
+                    )
+                }
             }
         }
     }
