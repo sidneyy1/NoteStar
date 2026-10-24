@@ -54,6 +54,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -77,8 +78,10 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
@@ -90,6 +93,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.riguel.notestar.data.Tool
+import com.riguel.notestar.data.selectedPresetIndex
 import kotlin.math.roundToInt
 
 // =====================================================================
@@ -469,10 +473,18 @@ fun ColorGrid(
     // row 2 = the next 8, row 3+ = purple + recents + customs.
     // (BasicPalette is ordered [7, 8, purple]; the highlighter
     // palette is a single row of 8, so its rows are [8] + tail.)
+    // De-duplicated by exact RGBA, palette first: a color that is
+    // both a preset and a recent (or a custom) appears exactly once,
+    // so exact-equality selection can never check two cells. Each
+    // cell draws its own stored color.
+    val shownRecents = recentColors.filter { it !in palette }
+    val shownCustoms = customColors.filter {
+        it !in palette && it !in shownRecents
+    }
     val rows: List<List<Color>> = if (isHighlighter) {
         // One row of 8, then recents + customs.
         listOf(palette) +
-            (recentColors + customColors).chunked(8)
+            (shownRecents + shownCustoms).chunked(8)
                 .filter { it.isNotEmpty() }
     } else {
         val row1 = (if (showTransparent) {
@@ -481,7 +493,7 @@ fun ColorGrid(
             emptyList()
         }) + palette.take(7)
         val row2 = palette.drop(7).take(8)
-        val tail = palette.drop(15) + recentColors + customColors
+        val tail = palette.drop(15) + shownRecents + shownCustoms
         listOf(row1, row2) +
             tail.chunked(8).filter { it.isNotEmpty() }
     }
@@ -498,17 +510,19 @@ fun ColorGrid(
             for (row in rows) {
                 Row(modifier = Modifier.fillMaxWidth()) {
                     for (color in row) {
-                        SwatchCell(
-                            color = color,
-                            selected = selected == color,
-                            onSelect = { onSelect(color) },
-                            onDelete = if (color in customColors) {
-                                { onDeleteCustom(color) }
-                            } else {
-                                null
-                            },
-                            cellWidth = cellWidth
-                        )
+                        key(color) {
+                            SwatchCell(
+                                color = color,
+                                selected = selected == color,
+                                onSelect = { onSelect(color) },
+                                onDelete = if (color in customColors) {
+                                    { onDeleteCustom(color) }
+                                } else {
+                                    null
+                                },
+                                cellWidth = cellWidth
+                            )
+                        }
                     }
                     // Pad a short last row so cells keep their width.
                     repeat(8 - row.size) {
@@ -981,7 +995,7 @@ private fun SizePreview(
             .fillMaxWidth()
             .height(72.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant),
+            .background(Color(0xFFF2F2F2)),
         contentAlignment = Alignment.Center
     ) {
         if (kind == PreviewKind.TEXT) {
@@ -1055,17 +1069,23 @@ private fun DecimalSizeField(
 }
 
 private val SizePresetLabels = listOf("XS", "S", "M", "L", "XL")
-private val SizePresetFractions = listOf(0.1f, 0.25f, 0.45f, 0.65f, 0.85f)
 
 /**
  * Preview + perceptual slider + steppers + numeric field + preset
  * chips. The slider itself is a FractionTrack (tap to jump, drag
  * to scrub) with a 28dp thumb on a 6dp teal track.
+ *
+ * Preset selection is radio-style and single-choice by
+ * construction: [selectedPresetIndex] (one state value, the size)
+ * returns at most one index, and each chip only reads whether it
+ * is that index. Chips carry stable keys (their labels), so list
+ * reuse or recomposition can't leave a stale highlight.
  */
 @Composable
 fun BrushSizeControl(
     size: Float,
     range: ClosedFloatingPointRange<Float>,
+    presets: List<Float>,
     unit: String,
     color: Color,
     kind: PreviewKind,
@@ -1129,51 +1149,64 @@ fun BrushSizeControl(
                 modifier = Modifier.padding(start = 4.dp)
             )
         }
-        // Preset chips, horizontally scrollable, each with a dot.
+        // Preset chips: radio-style, single selection from the one
+        // size value (see selectedPresetIndex). Horizontally
+        // scrollable as a fallback, but the padding is reduced so
+        // all five fit on a 360dp phone without scrolling.
+        val selectedPreset = selectedPresetIndex(size, presets)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
                 .padding(top = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             SizePresetLabels.forEachIndexed { i, label ->
-                val preset = fractionToSize(SizePresetFractions[i], range)
-                val selected = kotlin.math.abs(size - preset) <=
-                    (range.endInclusive - range.start) * 0.08f
-                val dotSize = preset.coerceIn(2f, 20f).dp
-                Box(
-                    modifier = Modifier
-                        .height(48.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(
-                            if (selected) DesignTokens.AccentTint
-                            else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                        .border(
-                            width = if (selected) 1.dp else 0.dp,
-                            color = if (selected) DesignTokens.Accent
-                            else Color.Transparent,
-                            shape = RoundedCornerShape(24.dp)
-                        )
-                        .clickable { onSizeChange(preset) }
-                        .padding(horizontal = 14.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(dotSize)
-                                .clip(CircleShape)
-                                .background(color)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (selected) DesignTokens.Accent
-                            else DesignTokens.TextPrimary
-                        )
+                val preset = presets.getOrNull(i) ?: return@forEachIndexed
+                val selected = i == selectedPreset
+                val dotSize = preset.coerceIn(2f, 16f).dp
+                key(label) {
+                    Box(
+                        modifier = Modifier
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(
+                                if (selected) DesignTokens.AccentTint
+                                else Color(0xFFF2F2F2)
+                            )
+                            .border(
+                                width = if (selected) 1.dp else 0.dp,
+                                color = if (selected) DesignTokens.Accent
+                                else Color.Transparent,
+                                shape = RoundedCornerShape(24.dp)
+                            )
+                            .clickable {
+                                onSizeChange(preset.coerceIn(range))
+                            }
+                            .semantics {
+                                role = Role.RadioButton
+                                this.selected = selected
+                            }
+                            .padding(horizontal = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(dotSize)
+                                    .clip(CircleShape)
+                                    .background(color)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (selected) DesignTokens.Accent
+                                else DesignTokens.TextPrimary
+                            )
+                        }
                     }
                 }
             }
@@ -1201,7 +1234,7 @@ fun PenTypeSegmentedControl(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .background(Color(0xFFF2F2F2))
             .padding(4.dp)
     ) {
         for ((key, label, icon) in items) {
@@ -1260,10 +1293,11 @@ enum class ToolSheetView { MAIN, COLOR, ADVANCED }
  * color views, scrolling if taller; on a tablet/landscape it caps
  * at 360dp wide and centers (the caller's column centers it).
  * The drag handle swipes down to dismiss; [onDismiss] is also
- * called by the caller's outside-tap scrim. Chrome uses
- * colorScheme.surface (not hardcoded white) so dark mode works,
- * and selection is always the teal accent — no lavender tint
- * anywhere in this sheet.
+ * called by the caller's outside-tap scrim. Chrome is explicit,
+ * not themed: sheet white (#FFFFFF), preview and unselected chips
+ * light gray (#F2F2F2) — the theme surface colors in this app
+ * resolve to Material3's lavender defaults, which is where the
+ * old tint came from. Selection is always the teal accent.
  */
 @Composable
 fun ToolOptionsSheet(
@@ -1279,6 +1313,7 @@ fun ToolOptionsSheet(
     showSize: Boolean,
     size: Float,
     sizeRange: ClosedFloatingPointRange<Float>,
+    presets: List<Float>,
     sizeUnit: String,
     previewKind: PreviewKind,
     onSizeChange: (Float) -> Unit,
@@ -1323,7 +1358,10 @@ fun ToolOptionsSheet(
             .widthIn(max = 360.dp)
             .fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
+        // Explicit white (v0.15.2): the theme surface color in this
+        // app resolves to Material3's default pale lavender
+        // (#FEF7FF), which is the tint the sheet used to show.
+        color = Color.White,
         shadowElevation = 6.dp
     ) {
         Column {
@@ -1335,7 +1373,7 @@ fun ToolOptionsSheet(
                     .padding(top = 8.dp, bottom = 4.dp)
                     .size(width = 32.dp, height = 4.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(Color(0xFFE5E5E5))
                     .pointerInput(Unit) {
                         detectVerticalDragGestures(
                             onDragEnd = {
@@ -1369,6 +1407,7 @@ fun ToolOptionsSheet(
                             BrushSizeControl(
                                 size = size,
                                 range = sizeRange,
+                                presets = presets,
                                 unit = sizeUnit,
                                 color = inkColor,
                                 kind = previewKind,
@@ -1388,27 +1427,39 @@ fun ToolOptionsSheet(
                                     start = 4.dp, bottom = 4.dp
                                 )
                             )
+                            // Single check, by construction: the
+                            // first cell is always the current color
+                            // (checked), and recents exclude it, so
+                            // no second cell can ever match it. Each
+                            // cell draws its own stored color.
+                            val rowRecents = recentColors
+                                .filter { it != inkColor }
+                                .take(6)
                             Row(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                SwatchCell(
-                                    color = inkColor,
-                                    selected = true,
-                                    onSelect = {},
-                                    onDelete = null,
-                                    cellWidth = 44.dp
-                                )
-                                for (recent in recentColors.take(6)) {
+                                key(inkColor) {
                                     SwatchCell(
-                                        color = recent,
-                                        selected = recent == inkColor,
-                                        onSelect = {
-                                            onColorCommit(recent)
-                                            onDismiss()
-                                        },
+                                        color = inkColor,
+                                        selected = true,
+                                        onSelect = {},
                                         onDelete = null,
                                         cellWidth = 44.dp
                                     )
+                                }
+                                for (recent in rowRecents) {
+                                    key(recent) {
+                                        SwatchCell(
+                                            color = recent,
+                                            selected = false,
+                                            onSelect = {
+                                                onColorCommit(recent)
+                                                onDismiss()
+                                            },
+                                            onDelete = null,
+                                            cellWidth = 44.dp
+                                        )
+                                    }
                                 }
                                 Spacer(modifier = Modifier.weight(1f))
                                 TextButton(
