@@ -222,6 +222,15 @@ object TextGeometry {
                             while (cut > 1 && lineWidth(rest.substring(0, cut)) > wrapWidthPt) {
                                 cut--
                             }
+                            // Never split a surrogate pair (an emoji is
+                            // two UTF-16 units): back off the cut if it
+                            // would leave a lone high surrogate at the
+                            // end of the piece.
+                            while (cut > 1 &&
+                                Character.isHighSurrogate(rest[cut - 1])
+                            ) {
+                                cut--
+                            }
                             out.add(rest.substring(0, cut))
                             rest = rest.substring(cut)
                         }
