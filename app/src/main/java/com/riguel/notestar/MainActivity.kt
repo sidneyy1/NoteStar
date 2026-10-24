@@ -296,7 +296,7 @@ fun NoteStarApp(
                 showCreate -> {
                     CreateNoteScreen(
                         onCancel = { showCreate = false },
-                        onCreate = { template, title, tags, cover ->
+                        onCreate = { template, title, tags, cover, format ->
                             val now = System.currentTimeMillis()
                             val doc = NoteDocument(
                                 id = NoteStorage.newId(),
@@ -305,7 +305,8 @@ fun NoteStarApp(
                                 createdAt = now,
                                 updatedAt = now,
                                 pages = listOf(Page.create(template)),
-                                coverColorValue = cover
+                                coverColorValue = cover,
+                                pageFormat = format
                             )
                             NoteStorage.saveNote(context, doc)
                             showCreate = false
@@ -361,7 +362,8 @@ fun NoteStarApp(
                                             page.copy(
                                                 id = "p" + System.nanoTime().toString()
                                             )
-                                        )
+                                        ),
+                                        pageFormat = activeDoc.pageFormat
                                     )
                                     NoteStorage.saveNote(context, excerpt)
                                     notify("Page saved as a new note: $excerptTitle")
