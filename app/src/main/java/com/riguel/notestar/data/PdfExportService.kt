@@ -222,8 +222,8 @@ object AnnotationRenderer {
     private fun resetState(): PDExtendedGraphicsState =
         PDExtendedGraphicsState().apply {
             setBlendMode(BlendMode.NORMAL)
-            setStrokeAlphaConstant(1f)
-            setNonStrokeAlphaConstant(1f)
+            setStrokingAlphaConstant(1f)
+            setNonStrokingAlphaConstant(1f)
         }
 
     private fun setColor(stream: PDPageContentStream, color: Color, stroke: Boolean) {
@@ -282,8 +282,8 @@ object AnnotationRenderer {
             stream.setGraphicsStateParameters(
                 PDExtendedGraphicsState().apply {
                     setBlendMode(BlendMode.MULTIPLY)
-                    setStrokeAlphaConstant(0.55f)
-                    setNonStrokeAlphaConstant(0.55f)
+                    setStrokingAlphaConstant(0.55f)
+                    setNonStrokingAlphaConstant(0.55f)
                 }
             )
             setColor(stream, color, stroke = true)
@@ -306,7 +306,7 @@ object AnnotationRenderer {
         if (pts.isEmpty()) return
         if (stroke.penType == PenTypes.PENCIL) {
             stream.setGraphicsStateParameters(
-                PDExtendedGraphicsState().apply { setStrokeAlphaConstant(0.85f) }
+                PDExtendedGraphicsState().apply { setStrokingAlphaConstant(0.85f) }
             )
         }
         setColor(stream, color, stroke = true)
@@ -346,7 +346,7 @@ object AnnotationRenderer {
 
     private fun fontFor(element: TextElement): PDType1Font = when (element.fontFamilyName) {
         TextFonts.SERIF -> when {
-            element.bold && element.italic -> PDType1Font.TIMES_BOLDITALIC
+            element.bold && element.italic -> PDType1Font.TIMES_BOLD_ITALIC
             element.bold -> PDType1Font.TIMES_BOLD
             element.italic -> PDType1Font.TIMES_ITALIC
             else -> PDType1Font.TIMES_ROMAN
