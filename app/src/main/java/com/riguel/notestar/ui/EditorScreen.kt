@@ -32,6 +32,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -1347,6 +1349,21 @@ fun EditorScreen(
             // Text overlays live in a page-sized box pinned to the
             // sheet and clipped to its edge; positions inside are
             // page-local (the same pattern as the PDF page box).
+            // v0.13.1 fix — this MUST be requiredSize, not size:
+            // size() is coerced by the page-area Box's constraints
+            // (the viewport), so above fit zoom this box was only
+            // viewport-sized, and clipToBounds then clipped text to
+            // [viewOffset, viewOffset + viewportSize] instead of to
+            // the page. A text box at local x*viewScale inside it was
+            // cut on the right by the viewport's right edge, and once
+            // x*viewScale exceeded the viewport width it vanished
+            // entirely — even while its screen position
+            // (viewOffset + x*viewScale) was still on screen, which is
+            // why the highlight (drawn in the Canvas with the full
+            // transform, not through this box) stayed visible. With
+            // requiredSize the box is the true page rectangle at
+            // every zoom, so the only clip text ever sees is the
+            // page bounds, exactly like the ink clip in the Canvas.
             Box(
                 modifier = Modifier
                     .offset {
@@ -1355,9 +1372,13 @@ fun EditorScreen(
                             viewOffset.y.roundToInt()
                         )
                     }
-                    .size(
-                        width = (pageFormat.widthPt * viewScale / density).dp,
-                        height = (pageFormat.heightPt * viewScale / density).dp
+                    .requiredSize(
+                        width = (TextGeometry.pageSizePx(
+                            pageFormat.widthPt, pageFormat.heightPt, viewScale
+                        ).first / density).dp,
+                        height = (TextGeometry.pageSizePx(
+                            pageFormat.widthPt, pageFormat.heightPt, viewScale
+                        ).second / density).dp
                     )
                     .clipToBounds()
             ) {
@@ -1396,7 +1417,14 @@ fun EditorScreen(
                                     onDone = { commitEditing() }
                                 ),
                                 modifier = position
-                                    .width(
+                                    // requiredWidth, not width, for the
+                                    // same reason as the box above:
+                                    // width() would be coerced by the
+                                    // container's constraints, so the
+                                    // editing field (and its caret)
+                                    // would be cut at high zoom while
+                                    // the rendered text was not.
+                                    .requiredWidth(
                                         (TextGeometry.wrapWidthPt(
                                             element, pageFormat.widthPt
                                         ) * viewScale / density).dp
@@ -1433,7 +1461,14 @@ fun EditorScreen(
                                     element, viewScale, scaledDensity
                                 ),
                                 modifier = position
-                                    .width(boxWidthDp)
+                                    // requiredWidth, not width: the box
+                                    // width in page points * viewScale
+                                    // must survive the container's
+                                    // constraints, or the text is
+                                    // measured at viewport width and
+                                    // clipped on the right as zoom
+                                    // grows (see the box comment).
+                                    .requiredWidth(boxWidthDp)
                                     .then(
                                         if (textInteractive) {
                                             Modifier
