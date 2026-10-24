@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Temporary: exists only to create this folder on GitHub so the
+     launcher foreground PNG can be uploaded here from the web.
+     Delete this file once ic_launcher_foreground.png is in place. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@android:color/transparent" />
+</shape>
