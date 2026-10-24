@@ -2,8 +2,6 @@ package com.riguel.notestar.data
 
 import android.content.Context
 import androidx.compose.ui.graphics.Color
-import com.riguel.notestar.ui.LegacyPaper
-import com.riguel.notestar.ui.PaperTemplates
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
@@ -104,7 +102,7 @@ object PdfExportService {
             if (doc.pdf != null) {
                 exportPdfNote(context, doc, pageIndices, options, isCancelled, onProgress, outFile)
             } else {
-                exportPlainNote(doc, pageIndices, options, isCancelled, onProgress, outFile)
+                exportPlainNote(context, doc, pageIndices, options, isCancelled, onProgress, outFile)
             }
         } catch (e: Exception) {
             outFile.delete()
@@ -152,6 +150,7 @@ object PdfExportService {
     }
 
     private fun exportPlainNote(
+        context: Context,
         doc: NoteDocument,
         pageIndices: List<Int>,
         options: ExportOptions,
@@ -161,6 +160,10 @@ object PdfExportService {
     ) {
         val target = PDDocument()
         target.use { out ->
+            // One embedded-font set per exported document (fonts are
+            // bound to their PDDocument). This is the normal-note path
+            // only; the imported-PDF path never creates one.
+            val fonts = ExportFontSet(out, context)
             pageIndices.forEachIndexed { outIndex, srcIndex ->
                 if (isCancelled()) throw ExportCancelled()
                 val notePage = doc.pages[srcIndex]
@@ -184,12 +187,12 @@ object PdfExportService {
                     stream.clip()
                     AnnotationRenderer.drawTemplate(
                         stream, notePage.template,
-                        rect.width, rect.height,
-                        PaperTemplates.PT_PER_MM
+                        rect.width, rect.height
                     )
                     if (options.includeAnnotations) {
                         AnnotationRenderer.drawNoteContent(
-                            stream, notePage, highlightsFirst = true
+                            stream, notePage, highlightsFirst = true,
+                            fonts = fonts, pageWidthPt = rect.width
                         )
                     }
                 }
@@ -264,11 +267,21 @@ object AnnotationRenderer {
     }
 
     /** Strokes of all visible layers (in order), then their text blocks —
-     * the same z-order as on screen. */
+     * the same z-order as on screen.
+     *
+     * [fonts] is non-null only for normal-note export: then text is drawn
+     * with embedded fonts ([drawTextEmbedded]) at the stored box width.
+     * The imported-PDF path passes null and keeps the old built-in-font
+     * [drawText] exactly as before — that path is not touched in v0.13.
+     * Highlight drawing is identical in both paths and is never changed
+     * here (see the v0.13 constraint: highlight export already matched).
+     */
     fun drawNoteContent(
         stream: PDPageContentStream,
         page: Page,
-        highlightsFirst: Boolean = false
+        highlightsFirst: Boolean = false,
+        fonts: ExportFontSet? = null,
+        pageWidthPt: Float? = null
     ) {
         val visible = page.layers.filter { it.visible }
         stream.setLineCapStyle(1)
@@ -292,7 +305,13 @@ object AnnotationRenderer {
         }
         stream.setGraphicsStateParameters(resetState())
         for (layer in visible) {
-            for (element in layer.texts) drawText(stream, element)
+            for (element in layer.texts) {
+                if (fonts != null && pageWidthPt != null) {
+                    drawTextEmbedded(stream, element, fonts, pageWidthPt)
+                } else {
+                    drawText(stream, element)
+                }
+            }
         }
     }
 
@@ -389,6 +408,10 @@ object AnnotationRenderer {
         }
     }
 
+    /**
+     * Legacy text path, used ONLY by imported-PDF export. Left exactly as
+     * it was in v0.13 (built-in font, 0.8em baseline estimate, no wrap).
+     */
     private fun drawText(stream: PDPageContentStream, element: TextElement) {
         val color = Color(element.colorValue)
         setColor(stream, color, stroke = false)
@@ -409,103 +432,130 @@ object AnnotationRenderer {
         }
     }
 
-    /** The paper template as vector lines/dots, from the shared registry. */
+    /**
+     * Normal-note text export (v0.13). Same anchor, size, padding, line
+     * height, wrap width, color, bold/italic/underline as the editor:
+     * - Size is the stored points, unchanged (the editor now also renders
+     *   that size, see textStyleForPage).
+     * - Glyph origin is box top-left + stored padding (page units).
+     * - First baseline = glyph top + the font's real ascent (TextMetrics),
+     *   multi-line step = the stored/shared line height.
+     * - Lines are wrapped with TextGeometry.wrapLines at the stored box
+     *   width, measured with the embedded font — the same width Compose
+     *   wraps at on screen.
+     * - Font is the embedded system/bundled font from [fonts], never a
+     *   built-in font; runs the main font cannot render fall back to the
+     *   embedded fallback font. Alignment is Start, as on screen.
+     * Text is drawn after highlights (caller order), above them.
+     */
+    private fun drawTextEmbedded(
+        stream: PDPageContentStream,
+        element: TextElement,
+        fonts: ExportFontSet,
+        pageWidthPt: Float
+    ) {
+        val color = Color(element.colorValue)
+        setColor(stream, color, stroke = false)
+        val font = fonts.fontFor(element)
+        // Loaded only if a run actually needs it (see drawRun below).
+        val fallback by lazy { fonts.fallbackFont(element.bold) }
+        val size = element.fontSizeSp
+        val ratios = TextMetrics.ratios(
+            element.fontFamilyName, element.bold, element.italic
+        )
+        val lineHeight = TextGeometry.lineHeightPt(element, ratios.lineHeight)
+        val firstBaseline = TextGeometry.baselinePt(
+            element.y, element.paddingPt, ratios.ascent, size
+        )
+        val wrapWidth = TextGeometry.wrapWidthPt(element, pageWidthPt)
+        val lines = TextGeometry.wrapLines(element.text, wrapWidth, size) { text, sz ->
+            fonts.stringWidthPt(font, text, sz)
+        }
+        val glyphX = element.x + element.paddingPt
+        lines.forEachIndexed { i, line ->
+            if (line.isEmpty()) return@forEachIndexed
+            val baseline = firstBaseline + i * lineHeight
+            // Split the line into runs the main font can / cannot render.
+            var runStart = 0
+            var runIsMain = fonts.hasGlyph(element, line.substring(0, 1))
+            var cursorX = glyphX
+            fun drawRun(start: Int, end: Int, useMain: Boolean) {
+                if (start >= end) return
+                val runText = line.substring(start, end)
+                val runFont = if (useMain) font else fallback
+                try {
+                    stream.beginText()
+                    stream.setFont(runFont, size)
+                    // Y-down stream space: flip the text matrix so glyphs
+                    // stay upright, at the shared baseline.
+                    stream.setTextMatrix(Matrix(1f, 0f, 0f, -1f, cursorX, baseline))
+                    stream.showText(runText)
+                    stream.endText()
+                } catch (e: Exception) {
+                    // A glyph neither font can encode must not fail the
+                    // whole export; that run is skipped, the rest draws.
+                    try { stream.endText() } catch (ignored: Exception) { }
+                }
+                cursorX += fonts.stringWidthPt(runFont, runText, size)
+            }
+            for (index in 1 until line.length) {
+                val canRender = fonts.hasGlyph(element, line.substring(index, index + 1))
+                if (canRender != runIsMain) {
+                    drawRun(runStart, index, runIsMain)
+                    runStart = index
+                    runIsMain = canRender
+                }
+            }
+            drawRun(runStart, line.length, runIsMain)
+            if (element.underline) {
+                val lineWidth = fonts.stringWidthPt(font, line, size)
+                val underlineY = baseline + size * 0.10f
+                setColor(stream, color, stroke = true)
+                stream.setLineWidth((size * 0.05f).coerceAtLeast(0.5f))
+                stream.moveTo(glyphX, underlineY)
+                stream.lineTo(glyphX + lineWidth, underlineY)
+                stream.stroke()
+                setColor(stream, color, stroke = false)
+            }
+        }
+    }
+
+    /**
+     * Normal-note paper template, from the SAME segment list the editor
+     * draws (ui/templateSegments). Same colors, same widths in points,
+     * same spacing/start/margins, each segment stroked exactly once, all
+     * inside the page rect (the caller already clips to the page). The
+     * old export template was a second, hand-copied implementation that
+     * could drift from the screen; it is deleted in v0.13. This function
+     * is only called for normal notes; imported PDFs never draw a
+     * template (their original page already has one).
+     */
     fun drawTemplate(
         stream: PDPageContentStream,
         template: PageTemplate,
         widthUnits: Float,
-        heightUnits: Float,
-        unitsPerMm: Float
+        heightUnits: Float
     ) {
-        val def = PaperTemplates.def(template)
-        val spacing = def.spacingMm * unitsPerMm
-        val top = def.topMarginMm * unitsPerMm
-        val c = def.patternColor
-        when (def.kind.name) {
-            "LINES" -> {
-                setColor(stream, c, stroke = true)
-                stream.setLineWidth(def.strokeWidthPx * LegacyPaper.UNIT_TO_PT)
-                var y = if (top > 0f) top else spacing
-                while (y < heightUnits) {
-                    stream.moveTo(0f, y)
-                    stream.lineTo(widthUnits, y)
-                    stream.stroke()
-                    y += spacing
-                }
-                if (template == PageTemplate.LINED) {
-                    // The editor's margin line (shared LegacyPaper value).
-                    val mx = LegacyPaper.MARGIN_X_MM * unitsPerMm
-                    setColor(stream, Color(0xFFF8BBD0), stroke = true)
-                    stream.moveTo(mx, 0f)
-                    stream.lineTo(mx, heightUnits)
-                    stream.stroke()
-                }
-                if (template == PageTemplate.PLANNER) {
-                    // Time column + checkboxes, same geometry as the
-                    // editor's page-space generator (LegacyPaper).
-                    val cx = LegacyPaper.PLANNER_COLUMN_MM * unitsPerMm
-                    setColor(stream, c, stroke = true)
-                    stream.moveTo(cx, 0f)
-                    stream.lineTo(cx, heightUnits)
-                    stream.stroke()
-                    val boxSize = LegacyPaper.CHECKBOX_SIZE_MM * unitsPerMm
-                    val bx = LegacyPaper.CHECKBOX_X_MM * unitsPerMm
-                    val lift = LegacyPaper.CHECKBOX_LIFT_MM * unitsPerMm
-                    setColor(stream, Color(0xFF90CAF9), stroke = true)
-                    var ry = if (top > 0f) top else spacing
-                    while (ry < heightUnits) {
-                        stream.addRect(bx, ry - lift, boxSize, boxSize)
-                        stream.stroke()
-                        ry += spacing
-                    }
-                }
-                if (template == PageTemplate.LECTURE) {
-                    // Header rules, same LegacyPaper geometry as the editor.
-                    val fromX = LegacyPaper.LECTURE_HEADER_X_MM * unitsPerMm
-                    setColor(stream, Color(0xFF90CAF9), stroke = true)
-                    for (headerMm in listOf(
-                        LegacyPaper.LECTURE_HEADER_1_MM,
-                        LegacyPaper.LECTURE_HEADER_2_MM
-                    )) {
-                        val hy = headerMm * unitsPerMm
-                        stream.moveTo(fromX, hy)
-                        stream.lineTo(widthUnits, hy)
-                        stream.stroke()
-                    }
-                }
-            }
-            "GRID" -> {
-                setColor(stream, c, stroke = true)
-                stream.setLineWidth(def.strokeWidthPx * LegacyPaper.UNIT_TO_PT)
-                var x = spacing
-                while (x < widthUnits) {
-                    stream.moveTo(x, 0f)
-                    stream.lineTo(x, heightUnits)
-                    stream.stroke()
-                    x += spacing
-                }
-                var y = spacing
-                while (y < heightUnits) {
-                    stream.moveTo(0f, y)
-                    stream.lineTo(widthUnits, y)
-                    stream.stroke()
-                    y += spacing
-                }
-            }
-            "DOTS" -> {
-                setColor(stream, c, stroke = false)
-                val r = def.strokeWidthPx * LegacyPaper.UNIT_TO_PT
-                var y = spacing
-                while (y < heightUnits) {
-                    var x = spacing
-                    while (x < widthUnits) {
-                        addDot(stream, x, y, r)
-                        x += spacing
-                    }
-                    y += spacing
-                }
-            }
-            else -> Unit // BLANK
+        val segments = com.riguel.notestar.ui.templateSegments(
+            template, widthUnits, heightUnits,
+            androidx.compose.ui.geometry.Rect(0f, 0f, widthUnits, heightUnits)
+        )
+        for (line in segments.lines) {
+            setColor(stream, line.color, stroke = true)
+            stream.setLineWidth(line.widthPt)
+            stream.moveTo(line.x1, line.y1)
+            stream.lineTo(line.x2, line.y2)
+            stream.stroke()
+        }
+        for (rect in segments.rects) {
+            setColor(stream, rect.color, stroke = true)
+            stream.setLineWidth(rect.widthPt)
+            stream.addRect(rect.x, rect.y, rect.sizePt, rect.sizePt)
+            stream.stroke()
+        }
+        for (dot in segments.dots) {
+            setColor(stream, dot.color, stroke = false)
+            addDot(stream, dot.cx, dot.cy, dot.radiusPt)
         }
     }
 
