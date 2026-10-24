@@ -163,28 +163,33 @@ object PdfExportService {
             pageIndices.forEachIndexed { outIndex, srcIndex ->
                 if (isCancelled()) throw ExportCancelled()
                 val notePage = doc.pages[srcIndex]
-                val rect = PDRectangle.A4
+                // The PDF page is exactly the note's page size, and page
+                // coordinates ARE PDF points: the export transform is
+                // scale 1 (plus the Y flip), so widths, font sizes and
+                // positions are identical to the editor at 100%.
+                val rect = PDRectangle(
+                    doc.pageFormat.widthPt, doc.pageFormat.heightPt
+                )
                 val pdPage = PDPage(rect)
                 out.addPage(pdPage)
                 PDPageContentStream(out, pdPage).use { stream ->
-                    // White page sheet.
+                    // Page color (white sheet).
                     stream.setNonStrokingColor(1f, 1f, 1f)
                     stream.addRect(0f, 0f, rect.width, rect.height)
                     stream.fill()
-                    // Work in page units (top-left origin, y down) like the
-                    // editor: scale units -> points and flip Y.
-                    val scale = rect.width / PaperTemplates.A4_WIDTH_UNITS
-                    stream.transform(
-                        Matrix(scale, 0f, 0f, -scale, 0f, rect.height)
-                    )
-                    val heightUnits =
-                        PaperTemplates.A4_WIDTH_UNITS * (rect.height / rect.width)
+                    stream.transform(Matrix(1f, 0f, 0f, -1f, 0f, rect.height))
+                    // Clip everything to the page rectangle.
+                    stream.addRect(0f, 0f, rect.width, rect.height)
+                    stream.clip()
                     AnnotationRenderer.drawTemplate(
                         stream, notePage.template,
-                        PaperTemplates.A4_WIDTH_UNITS, heightUnits
+                        rect.width, rect.height,
+                        PaperTemplates.PT_PER_MM
                     )
                     if (options.includeAnnotations) {
-                        AnnotationRenderer.drawNoteContent(stream, notePage)
+                        AnnotationRenderer.drawNoteContent(
+                            stream, notePage, highlightsFirst = true
+                        )
                     }
                 }
                 onProgress(outIndex + 1, pageIndices.size)
@@ -259,12 +264,30 @@ object AnnotationRenderer {
 
     /** Strokes of all visible layers (in order), then their text blocks —
      * the same z-order as on screen. */
-    fun drawNoteContent(stream: PDPageContentStream, page: Page) {
+    fun drawNoteContent(
+        stream: PDPageContentStream,
+        page: Page,
+        highlightsFirst: Boolean = false
+    ) {
         val visible = page.layers.filter { it.visible }
         stream.setLineCapStyle(1)
         stream.setLineJoinStyle(1)
-        for (layer in visible) {
-            for (stroke in layer.strokes) drawStroke(stream, stroke)
+        if (highlightsFirst) {
+            // Normal-note export order: paper, highlights, ink, text.
+            for (layer in visible) {
+                for (stroke in layer.strokes) {
+                    if (stroke.highlighter) drawStroke(stream, stroke)
+                }
+            }
+            for (layer in visible) {
+                for (stroke in layer.strokes) {
+                    if (!stroke.highlighter) drawStroke(stream, stroke)
+                }
+            }
+        } else {
+            for (layer in visible) {
+                for (stroke in layer.strokes) drawStroke(stream, stroke)
+            }
         }
         stream.setGraphicsStateParameters(resetState())
         for (layer in visible) {
@@ -390,11 +413,12 @@ object AnnotationRenderer {
         stream: PDPageContentStream,
         template: PageTemplate,
         widthUnits: Float,
-        heightUnits: Float
+        heightUnits: Float,
+        unitsPerMm: Float
     ) {
         val def = PaperTemplates.def(template)
-        val spacing = def.spacingMm * PaperTemplates.UNITS_PER_MM
-        val top = def.topMarginMm * PaperTemplates.UNITS_PER_MM
+        val spacing = def.spacingMm * unitsPerMm
+        val top = def.topMarginMm * unitsPerMm
         val c = def.patternColor
         when (def.kind.name) {
             "LINES" -> {
@@ -409,7 +433,7 @@ object AnnotationRenderer {
                 }
                 if (template == PageTemplate.LINED) {
                     // The editor's margin line, 1 inch from the left.
-                    val mx = 25.4f * PaperTemplates.UNITS_PER_MM
+                    val mx = 25.4f * unitsPerMm
                     setColor(stream, Color(0xFFE57373), stroke = true)
                     stream.moveTo(mx, 0f)
                     stream.lineTo(mx, heightUnits)
