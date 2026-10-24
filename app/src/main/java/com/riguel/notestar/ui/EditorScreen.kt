@@ -351,6 +351,22 @@ fun EditorScreen(
         }
     }
 
+    fun loadWork(page: Page) {
+        layersWork.clear()
+        page.layers.forEach { layersWork.add(LayerWork(it)) }
+        activeLayerId = layersWork.firstOrNull()?.id
+    }
+
+    fun snapshotCurrentPage(): Page {
+        val base = pagesState[currentPageIndex]
+        return Page(
+            id = base.id,
+            template = currentTemplate,
+            pdfPageIndex = base.pdfPageIndex,
+            layers = layersWork.map { it.toLayer() }
+        )
+    }
+
     /** True when any stored content falls outside [fmt]'s page. */
     fun contentOutsidePage(fmt: PageFormat): Boolean {
         val pages = pagesState.mapIndexed { i, p ->
@@ -369,22 +385,6 @@ fun EditorScreen(
                 }
             }
         }
-    }
-
-    fun loadWork(page: Page) {
-        layersWork.clear()
-        page.layers.forEach { layersWork.add(LayerWork(it)) }
-        activeLayerId = layersWork.firstOrNull()?.id
-    }
-
-    fun snapshotCurrentPage(): Page {
-        val base = pagesState[currentPageIndex]
-        return Page(
-            id = base.id,
-            template = currentTemplate,
-            pdfPageIndex = base.pdfPageIndex,
-            layers = layersWork.map { it.toLayer() }
-        )
     }
 
     // One-time initial load
@@ -940,22 +940,26 @@ fun EditorScreen(
                     topLeft = viewOffset,
                     size = sheetSize
                 )
-                clipRect(
-                    left = viewOffset.x,
-                    top = viewOffset.y,
-                    right = viewOffset.x + sheetSize.width,
-                    bottom = viewOffset.y + sheetSize.height
-                ) {
-                    drawPaperPattern(
-                        currentTemplate, viewScale, viewOffset, size,
-                        PaperTemplates.PT_PER_MM
-                    )
-                }
+                // The pattern function bounds itself to the given size,
+                // so passing the sheet size keeps it inside the page.
+                drawPaperPattern(
+                    currentTemplate, viewScale, viewOffset, sheetSize,
+                    PaperTemplates.PT_PER_MM
+                )
                 withTransform({
                     translate(viewOffset.x, viewOffset.y)
                     scale(viewScale, viewScale, Offset.Zero)
                 }) {
-                    clipRect(0f, 0f, pageFormat.widthPt, pageFormat.heightPt) {
+                    // Clip ink to the page through the raw canvas
+                    // (DrawScope.clipRect is unavailable in this Compose
+                    // version); the transform makes these page coords.
+                    drawContext.canvas.save()
+                    drawContext.canvas.clipRect(
+                        androidx.compose.ui.geometry.Rect(
+                            0f, 0f, pageFormat.widthPt, pageFormat.heightPt
+                        )
+                    )
+                    try {
                     for (layer in layersWork) {
                         if (!layer.visible) continue
                         for (stroke in layer.strokes) {
@@ -998,6 +1002,8 @@ fun EditorScreen(
                             }
                         }
                     }
+                    } finally {
+                        drawContext.canvas.restore()
                     }
                 }
             }
